@@ -175,6 +175,7 @@ function isListMessage(dict) {
 function isDetailMessage(dict) {
   return !!(dict.detail_kind !== undefined || dict.reply_chunk !== undefined ||
             dict.reply_end !== undefined || dict.choice_label !== undefined ||
+            dict.question_description_chunk !== undefined || dict.choice_detail !== undefined ||
             dict.question_end !== undefined);
 }
 
@@ -971,6 +972,7 @@ function promptChoices(flow) {
       choices.push({
         label: typeof option.label === 'string' ? option.label : option.value,
         value: option.value,
+        description: typeof option.description === 'string' ? option.description : '',
         selected: !!selected[option.value]
       });
     });
@@ -979,7 +981,8 @@ function promptChoices(flow) {
     (field.options || []).forEach(function (option) {
       choices.push({
         label: typeof option.label === 'string' ? option.label : option.value,
-        value: option.value
+        value: option.value,
+        description: typeof option.description === 'string' ? option.description : ''
       });
     });
   }
@@ -996,6 +999,8 @@ function sendQuestionPrompt(notice) {
   var fieldTitle = typeof field.title === 'string' && field.title ? field.title : field.key;
   var noticeText = notice || flow.overrideNotice || '';
   flow.overrideNotice = '';
+  var description = typeof field.description === 'string' ? field.description : '';
+  var descriptionChunks = unicodeChunks(description, 120, 120);
 
   state.detailKind = 'question';
   enqueue({
@@ -1004,8 +1009,16 @@ function sendQuestionPrompt(notice) {
     question_title: String(flow.form.title).slice(0, 80),
     question_field: String(fieldTitle).slice(0, 48),
     question_notice: String(noticeText).slice(0, 32),
+    question_description_count: descriptionChunks.length,
     question_count: choices.length,
     question_multi: field.type === 'multiselect' ? 1 : 0
+  });
+  descriptionChunks.forEach(function (chunk, index) {
+    enqueue({
+      session_id: flow.sessionId,
+      question_description_index: index,
+      question_description_chunk: chunk
+    });
   });
   choices.forEach(function (choice, index) {
     enqueue({
@@ -1230,6 +1243,22 @@ function startQuestion(sessionId) {
   state.lastReplyKey = '';
   advanceFlow();
   return true;
+}
+
+function sendChoiceDetail(sessionId, index) {
+  var flow = state.flow;
+  var choice = flow && flow.sessionId === sessionId && index >= 0 ? flow.choices[index] : null;
+  var description = choice && typeof choice.description === 'string' ? choice.description : '';
+  var label = choice && typeof choice.label === 'string' ? choice.label : '';
+  var descriptionChunks = unicodeChunks(description, 200, 200);
+  var labelChunks = unicodeChunks(label, 120, 120);
+  enqueue({
+    choice_detail: 1,
+    session_id: sessionId,
+    choice_index: index,
+    choice_label: labelChunks.length ? labelChunks[0] : '',
+    choice_description: descriptionChunks.length ? descriptionChunks[0] : ''
+  });
 }
 
 function selectChoice(index) {
@@ -1520,6 +1549,9 @@ function handleWatchMessage(payload) {
   }
   if (payload.clear_completed && payload.session_id) {
     clearChatRead(String(payload.session_id));
+  }
+  if (payload.choice_detail_req && payload.session_id && payload.choice_index !== undefined) {
+    sendChoiceDetail(String(payload.session_id), Number(payload.choice_index));
   }
   if (payload.permission_decision && payload.session_id && payload.permission_request_id) {
     decidePermission(String(payload.session_id), String(payload.permission_request_id),

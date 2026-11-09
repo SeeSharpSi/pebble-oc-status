@@ -506,6 +506,44 @@ test('a cached entry without text is refreshed before showing no reply', async (
   );
 });
 
+test('question text and answer descriptions are sent to the watch', () => {
+  const h = harness();
+  const questionText = 'I found an uncommitted user edit in games/catan/info.json: the tagline is now "Trade, build, settle. But hexagons." Include it in this deploy or leave it uncommitted?';
+  const field = {
+    key: 'tagline',
+    type: 'string',
+    title: 'Uncommitted tagline',
+    description: questionText,
+    options: [
+      { value: 'include', label: 'Include it', description: 'Commit the tagline change and deploy it with the new theme.' },
+      { value: 'leave', label: 'Leave it uncommitted', description: 'Deploy only the theme and cache-busting changes; keep the tagline edit local.' }
+    ]
+  };
+  h.fire('opencode', 'question', {
+    instances: [question('ses_q', 'frm_1', [field])]
+  });
+  h.takeSent();
+
+  h.watch({ detail_req: 1, session_id: 'ses_q' });
+  const messages = h.takeSent();
+  const begin = messages.find((message) => message.detail_kind === 2);
+  assert.ok(begin);
+  assert.ok(begin.question_description_count > 1);
+  assert.equal(
+    messages.filter((message) => message.question_description_chunk)
+      .sort((a, b) => a.question_description_index - b.question_description_index)
+      .map((message) => message.question_description_chunk).join(''),
+    questionText
+  );
+
+  h.watch({ choice_detail_req: 1, session_id: 'ses_q', choice_index: 0 });
+  const detail = h.takeSent().find((message) => message.choice_detail === 1);
+  assert.ok(detail);
+  assert.equal(detail.choice_index, 0);
+  assert.equal(detail.choice_label, 'Include it');
+  assert.equal(detail.choice_description, 'Commit the tagline change and deploy it with the new theme.');
+});
+
 test('permission detail routes before replies and approves once', async () => {
   const h = harness();
   h.setPermission({
