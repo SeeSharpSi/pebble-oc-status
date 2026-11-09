@@ -1,0 +1,101 @@
+{
+  "name": "oc-status",
+  "author": "OpenCode for Pebble contributors",
+  "version": "1.2.0",
+  "keywords": [
+    "pebble-app"
+  ],
+  "private": true,
+  "scripts": {
+    "test": "node --test test/*.test.js"
+  },
+  "dependencies": {},
+  "pebble": {
+    "displayName": "OC Status",
+    "uuid": "67166e14-419d-42b3-9bb4-af34cc83b436",
+    "sdkVersion": "3",
+    "manifestVersion": 2,
+    "enableMultiJS": true,
+    "targetPlatforms": [
+      "aplite",
+      "basalt",
+      "chalk",
+      "diorite",
+      "emery",
+      "flint",
+      "gabbro"
+    ],
+    "watchapp": {
+      "watchface": false
+    },
+    "usesPermissions": [
+      {
+        "name": "InvokeAction",
+        "plugin": "4e2c758f-8a31-4bf2-a6d9-7c40ec9b5173",
+        "reason": "To answer OpenCode questions from the watch",
+        "required": true
+      }
+    ],
+    "messageKeys": [
+      "req",
+      "list_begin",
+      "list_end",
+      "count",
+      "index",
+      "session_id",
+      "session_name",
+      "session_flags",
+      "status_text",
+      "detail_req",
+      "detail_kind",
+      "detail_title",
+      "detail_status",
+      "detail_text",
+      "reply_index",
+      "reply_count",
+      "reply_chunk",
+      "reply_end",
+      "question_title",
+      "question_field",
+      "question_notice",
+      "question_count",
+      "question_multi",
+      "choice_index",
+      "choice_label",
+      "choice_flags",
+      "question_end",
+      "answer_req",
+      "result_ok",
+      "result_text",
+      "send_prompt_begin",
+      "send_prompt_index",
+      "send_prompt_chunk",
+      "send_prompt_count",
+      "send_prompt_end",
+      "send_delivery",
+      "send_ok",
+      "send_result_text",
+      "detail_close",
+      "detail_message_id",
+      "mark_read",
+      "permission_request_id",
+      "permission_decision",
+      "permission_choice"
+    ],
+    "resources": {
+      "media": [
+        {
+          "menuIcon": true,
+          "file": "icon.png",
+          "name": "ICON",
+          "type": "bitmap"
+        },
+        {
+          "type": "font",
+          "name": "BRAILLE_FONT_20",
+          "file": "fonts/braille.ttf"
+        }
+      ]
+    }
+  }
+}
