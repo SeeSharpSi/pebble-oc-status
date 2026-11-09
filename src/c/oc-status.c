@@ -61,6 +61,7 @@ static Session s_incoming[MAX_SESSIONS];
 static int s_session_count;
 static int s_incoming_count;
 static bool s_list_loading = true;
+static bool s_have_list;
 static char s_status_text[48] = "Connecting...";
 static bool s_has_spinner;
 static int s_spin_frame;
@@ -1055,9 +1056,12 @@ static void append_reply_chunk(const char *chunk) {
 
 static void handle_list_begin(DictionaryIterator *iter) {
   s_incoming_count = 0;
-  s_list_loading = true;
-  s_session_count = 0;
-  if (s_list_menu) menu_layer_reload_data(s_list_menu);
+  // Keep the current rows visible while the replacement list arrives. Clearing here caused the
+  // "Connecting..." flash on every update.
+  if (!s_have_list) {
+    s_list_loading = true;
+    if (s_list_menu) menu_layer_reload_data(s_list_menu);
+  }
 }
 
 static void handle_list_session(DictionaryIterator *iter) {
@@ -1077,6 +1081,7 @@ static void handle_list_end(DictionaryIterator *iter) {
   s_session_count = s_incoming_count;
   if (s_session_count > MAX_SESSIONS) s_session_count = MAX_SESSIONS;
   s_list_loading = false;
+  s_have_list = true;
 
   const char *status = tuple_string(iter, MESSAGE_KEY_status_text, NULL);
   if (status) {

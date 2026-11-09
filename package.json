@@ -1,7 +1,7 @@
 {
   "name": "oc-status",
   "author": "OpenCode for Pebble contributors",
-  "version": "1.2.0",
+  "version": "1.2.1",
   "keywords": [
     "pebble-app"
   ],
@@ -97,5 +97,6 @@
         }
       ]
     }
-  }
+  },
+  "repository": "https://github.com/SeeSharpSi/pebble-oc-status"
 }
