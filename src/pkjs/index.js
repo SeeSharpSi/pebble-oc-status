@@ -377,6 +377,12 @@ function mergedSessions() {
     if (!status && state.unviewed[id]) {
       flags |= FLAG_UNVIEWED | FLAG_ATTENTION;
     }
+    // A new run supersedes an earlier completion badge. Keep permission and question
+    // attention, but a running session with only unread history shows motion, not a dot.
+    if (active && active.status === 'Running' && (flags & FLAG_UNVIEWED) &&
+        !(flags & (FLAG_PERMISSION | FLAG_QUESTION))) {
+      flags &= ~(FLAG_UNVIEWED | FLAG_ATTENTION);
+    }
     list.push({ id: id, name: cleanName(name), flags: flags, updated: updated || 0 });
   }
 

@@ -138,6 +138,7 @@ static bool s_prompt_uploading;
 static bool s_send_pending;
 
 static void spinner_tick(void *data);
+static void list_recalc_spinner(void);
 static void detail_error(const char *text);
 #ifndef PBL_PLATFORM_APLITE
 static void detail_show_send_mode(void);
@@ -191,6 +192,10 @@ static GColor reason_dot_color(uint8_t flags, bool highlighted) {
 #else
   return highlighted ? GColorWhite : attention_color();
 #endif
+}
+
+static bool session_shows_spinner(uint8_t flags) {
+  return (flags & FLAG_RUNNING) && !(flags & (FLAG_PERMISSION | FLAG_QUESTION));
 }
 
 static void draw_reason_dot(GContext *ctx, GPoint center, uint8_t flags, bool highlighted) {
@@ -345,9 +350,9 @@ static void list_draw_row(GContext *ctx, const Layer *cell_layer, MenuIndex *cel
   int right_inset = has_status ? (bounds.size.w - status_rect.origin.x + 4) :
                                  PBL_IF_ROUND_ELSE(28, 6);
 
-  // Attention wins over motion: a session that is both running and waiting for input is
-  // something to act on, not something to watch.
-  if (session->flags & (FLAG_ATTENTION | FLAG_UNVIEWED | FLAG_PERMISSION | FLAG_QUESTION)) {
+  // A running session shows motion even when it has an unread completion; permission and
+  // question dots still take priority because those need an answer.
+  if (session->flags & (FLAG_PERMISSION | FLAG_QUESTION)) {
     draw_reason_dot(ctx,
                     GPoint(status_rect.origin.x + status_rect.size.w / 2, bounds.size.h / 2),
                     session->flags, highlighted);
@@ -356,6 +361,10 @@ static void list_draw_row(GContext *ctx, const Layer *cell_layer, MenuIndex *cel
                                (bounds.size.h - SPINNER_BOX_HEIGHT) / 2 + SPINNER_NUDGE,
                                status_rect.size.w, SPINNER_BOX_HEIGHT);
     draw_spinner(ctx, spinner_rect, highlighted ? foreground : muted_text(), s_spin_frame);
+  } else if (session->flags & (FLAG_ATTENTION | FLAG_UNVIEWED)) {
+    draw_reason_dot(ctx,
+                    GPoint(status_rect.origin.x + status_rect.size.w / 2, bounds.size.h / 2),
+                    session->flags, highlighted);
   }
 
   graphics_context_set_text_color(ctx, foreground);
@@ -416,6 +425,7 @@ static void list_select_long(MenuLayer *menu_layer, MenuIndex *cell_index, void 
 
   request_clear_completed(session->id);
   session->flags &= (uint8_t)~(FLAG_UNVIEWED | FLAG_ATTENTION);
+  list_recalc_spinner();
   copy_clean(s_status_text, sizeof(s_status_text), "Clearing...", true);
   if (s_list_menu) menu_layer_reload_data(s_list_menu);
   if (s_footer_layer) layer_mark_dirty(s_footer_layer);
@@ -502,14 +512,13 @@ static bool detail_status_visible(void) {
 }
 
 static bool detail_spinner_active(void) {
-  return s_detail_open && (s_detail_flags & FLAG_RUNNING) &&
-         !(s_detail_flags & (FLAG_ATTENTION | FLAG_UNVIEWED));
+  return s_detail_open && session_shows_spinner(s_detail_flags);
 }
 
 static void detail_status_update(Layer *layer, GContext *ctx) {
   if (!detail_status_visible()) return;
   GRect bounds = layer_get_bounds(layer);
-  if (s_detail_flags & (FLAG_ATTENTION | FLAG_UNVIEWED | FLAG_PERMISSION | FLAG_QUESTION)) {
+  if (s_detail_flags & (FLAG_PERMISSION | FLAG_QUESTION)) {
     draw_reason_dot(ctx, GPoint(bounds.size.w / 2, bounds.size.h / 2),
                     s_detail_flags, false);
     return;
@@ -519,7 +528,10 @@ static void detail_status_update(Layer *layer, GContext *ctx) {
                                (bounds.size.h - SPINNER_BOX_HEIGHT) / 2 + SPINNER_NUDGE,
                                bounds.size.w, SPINNER_BOX_HEIGHT);
     draw_spinner(ctx, spinner_rect, GColorBlack, s_spin_frame);
+    return;
   }
+  draw_reason_dot(ctx, GPoint(bounds.size.w / 2, bounds.size.h / 2),
+                  s_detail_flags, false);
 }
 
 static void layout_detail_header(void) {
@@ -1509,6 +1521,19 @@ static void handle_list_session(DictionaryIterator *iter) {
   if (index + 1 > s_incoming_count) s_incoming_count = index + 1;
 }
 
+static void list_recalc_spinner(void) {
+  s_has_spinner = false;
+  for (int i = 0; i < s_session_count; i++) {
+    if (session_shows_spinner(s_sessions[i].flags)) {
+      s_has_spinner = true;
+      break;
+    }
+  }
+  if (s_has_spinner && !s_spin_timer) {
+    s_spin_timer = app_timer_register(80, spinner_tick, NULL);
+  }
+}
+
 static void handle_list_end(DictionaryIterator *iter) {
   memcpy(s_sessions, s_incoming, sizeof(s_sessions));
   s_session_count = s_incoming_count;
@@ -1524,14 +1549,7 @@ static void handle_list_end(DictionaryIterator *iter) {
              s_session_count == 1 ? "" : "s");
   }
 
-  s_has_spinner = false;
-  for (int i = 0; i < s_session_count; i++) {
-    if ((s_sessions[i].flags & FLAG_RUNNING) &&
-        !(s_sessions[i].flags & (FLAG_ATTENTION | FLAG_UNVIEWED))) {
-      s_has_spinner = true;
-      break;
-    }
-  }
+  list_recalc_spinner();
 
   bool detail_found = false;
   for (int i = 0; i < s_session_count; i++) {

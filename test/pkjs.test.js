@@ -282,6 +282,7 @@ test('completed replies become attention dots until the session is opened', () =
   h.fire('agent', 'configured', { instances: [{ properties: { configured: { boolean: { value: true } } } }] });
   h.fire('opencode', 'active_session', { instances: [session('ses_a', 'Krtni Project')] });
   h.fire('opencode', 'reply', { instances: [reply('ses_a', 'msg_1', 'Done with the first pass.')] });
+  h.fire('opencode', 'active_session', { instances: [] });
 
   let sessions = h.sessionMessages(h.takeSent());
   assert.ok(sessions[0].flags & 8, 'unviewed flag');
@@ -364,6 +365,21 @@ test('replies source supplies latest replies for non-default sessions', async ()
     'First session reply'
   );
   assert.equal(messages.some((message) => message.detail_kind === 3), false);
+});
+
+test('running sessions show the spinner instead of an unread dot', () => {
+  const h = harness();
+  h.fire('opencode', 'chat_status', {
+    instances: [chatStatusRow('ses_a', 'Running chat', {
+      reason: 'Unread', unread: true, messageId: 'msg_1'
+    })]
+  });
+  h.fire('opencode', 'active_session', { instances: [session('ses_a', 'Running chat')] });
+  const sessions = h.sessionMessages(h.takeSent());
+  assert.equal(sessions.length, 1);
+  assert.ok(sessions[0].flags & 1, 'running flag');
+  assert.equal(sessions[0].flags & 8, 0, 'no unread dot while running');
+  assert.equal(sessions[0].flags & 2, 0, 'no attention count while running');
 });
 
 test('chat status drives permission, question, and unread badge flags', () => {
