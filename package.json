@@ -11,7 +11,7 @@
   },
   "dependencies": {},
   "pebble": {
-    "displayName": "OC Status",
+    "displayName": "OpenCode Status",
     "uuid": "67166e14-419d-42b3-9bb4-af34cc83b436",
     "sdkVersion": "3",
     "manifestVersion": 2,

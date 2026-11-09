@@ -1,4 +1,4 @@
-# OC Status
+# OpenCode Status
 
 A Pebble watchapp for the [OpenCode Pebble plugin](../oc-plugin). It shows the sessions the
 plugin knows about and lets you open them from the watch.
