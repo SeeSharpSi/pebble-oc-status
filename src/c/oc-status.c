@@ -12,7 +12,8 @@
 #define SESSION_NAME_LEN 56
 #define MAX_CHOICES 24
 #define CHOICE_LABEL_LEN 56
-#define HEADER_HEIGHT PBL_IF_ROUND_ELSE(56, 46)
+#define LIST_ROW_HEIGHT 38
+#define HEADER_HEIGHT LIST_ROW_HEIGHT
 #define HEADER_TOP PBL_IF_ROUND_ELSE(7, 0)
 #define QUESTION_PROMPT_HEIGHT 30
 #define SPINNER_BOX_HEIGHT 24
@@ -273,7 +274,7 @@ static uint16_t list_get_num_rows(MenuLayer *menu_layer, uint16_t section_index,
 }
 
 static int16_t list_get_cell_height(MenuLayer *menu_layer, MenuIndex *cell_index, void *data) {
-  return 38;
+  return LIST_ROW_HEIGHT;
 }
 
 static void list_draw_empty(GContext *ctx, const Layer *cell_layer) {
