@@ -739,6 +739,11 @@ function maybeUpdateOpenReply(entry) {
 function onReplies(envelope) {
   state.errors.replies = null;
   var map = {};
+  // Keep cached entries when a refresh omits a session. The source can be empty while the plugin
+  // is reconnecting; wiping the map made every open show the "not in recent replies" message.
+  Object.keys(state.replies).forEach(function (id) {
+    map[id] = state.replies[id];
+  });
   (envelope && envelope.instances ? envelope.instances : []).forEach(function (instance) {
     if (!instance) return;
     var properties = instance.properties || {};
@@ -751,7 +756,6 @@ function onReplies(envelope) {
     }
     map[sessionId] = entry;
     rememberSession(sessionId, entry.title, entry.updated);
-    markReplyEntryAttention(entry);
   });
   if (state.reply && !map[state.reply.sessionId]) {
     map[state.reply.sessionId] = state.reply;
@@ -875,11 +879,6 @@ function refreshReplyForDetail(sessionId) {
   }
   if (entry && focusedSession) {
     refreshFocusedReply(sessionId, true);
-    return;
-  }
-  if (entry) {
-    sendMessageDetail(sessionId, nameFor(sessionId), entry.status || 'No reply',
-      noReplyMessage(sessionId));
     return;
   }
 
@@ -1399,6 +1398,7 @@ function startSubscriptions() {
   subscribeSource('opencode', 'active_session', 'active', onActive);
   subscribeSource('opencode', 'chat_status', 'chatStatus', onChatStatus);
   subscribeSource('opencode', 'question', 'question', onQuestions);
+  subscribeSource('opencode', 'replies', 'replies', onReplies);
   subscribeSource('opencode', 'reply', 'reply', function (envelope) {
     applyReply(envelope, false);
     rebuild();

@@ -464,6 +464,48 @@ test('long-press clears a completed session without opening it', async () => {
   assert.equal(sessions[0].flags & 8, 0, 'stale status does not restore the dot');
 });
 
+test('replies source is subscribed and cached replies survive an empty refresh', () => {
+  const h = harness();
+  assert.ok(h.subscriptions.some((entry) => entry.category === 'opencode' && entry.item === 'replies'));
+  h.setReplies({ instances: [replyRow('ses_a', 'Krtni Project', 'msg_1', 'First reply')] });
+  h.fire('opencode', 'replies', { instances: [replyRow('ses_a', 'Krtni Project', 'msg_1', 'First reply')] });
+  h.takeSent();
+
+  h.fire('opencode', 'replies', { instances: [] });
+  h.takeSent();
+  h.watch({ detail_req: 1, session_id: 'ses_a' });
+  const messages = h.takeSent();
+  assert.ok(messages.some((message) => message.detail_kind === 1));
+  assert.equal(
+    messages.filter((message) => message.reply_chunk).map((message) => message.reply_chunk).join(''),
+    'First reply'
+  );
+});
+
+test('a cached entry without text is refreshed before showing no reply', async () => {
+  const h = harness();
+  h.fire('opencode', 'replies', {
+    instances: [{
+      instanceId: 'ses_a',
+      properties: {
+        session_id: { longText: { text: 'ses_a' } },
+        status: { shortText: { text: 'Idle' }, longText: { text: 'No reply' } }
+      }
+    }]
+  });
+  h.takeSent();
+  h.setReplies({ instances: [replyRow('ses_a', 'Krtni Project', 'msg_1', 'Fresh reply')] });
+
+  h.watch({ detail_req: 1, session_id: 'ses_a' });
+  await new Promise((resolve) => setImmediate(resolve));
+  const messages = h.takeSent();
+  assert.ok(messages.some((message) => message.detail_kind === 1));
+  assert.equal(
+    messages.filter((message) => message.reply_chunk).map((message) => message.reply_chunk).join(''),
+    'Fresh reply'
+  );
+});
+
 test('permission detail routes before replies and approves once', async () => {
   const h = harness();
   h.setPermission({
