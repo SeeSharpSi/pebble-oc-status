@@ -7,7 +7,8 @@ plugin knows about and lets you open them from the watch.
 - A dot marks a session that needs attention. On colour watches it is green for an unread reply,
   yellow for a question, and red for a permission request. On black-and-white watches the dot keeps
   the existing single-colour treatment.
-- Up/down moves through the list. Select opens a session. Long-press Select refreshes the list.
+- Up/down moves through the list. Select opens a session. Long-press Select on a completed session
+  clears its green dot; on any other row it refreshes the list.
 - The detail header is the session name, with the same spinner or reason-coloured dot on its right
   as the session has in the list.
 - The spinner uses the same ten braille frames and 80 ms interval as the OpenCode CLI.
@@ -32,7 +33,8 @@ pending permissions or questions even when they are outside the recent reply lis
 Unread is the plugin’s watch-local marker, not the desktop read state. Reading a chat on the
 computer does not clear the watch dot. The app calls `mark_chat_read` with the exact message ID that
 was displayed, only after a complete reply is shown. If a newer reply exists, the dot correctly
-remains.
+remains. Long-pressing a completed list row clears its green dot without opening the session; the
+phone passes the message ID from `chat_status` so the same exact reply is marked read.
 
 Reply text is fetched from `opencode/replies` on demand when a session is opened, then cached. The
 focused `opencode/reply` source still refreshes the default or last-sent session every 20 seconds.

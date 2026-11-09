@@ -431,6 +431,39 @@ test('mark_read from the watch marks the displayed message read', async () => {
   assert.equal(sessions[0].flags & 8, 0, 'unread dot cleared');
 });
 
+test('long-press clears a completed session without opening it', async () => {
+  const h = harness();
+  h.fire('opencode', 'chat_status', {
+    instances: [chatStatusRow('ses_a', 'Krtni Project', {
+      reason: 'Unread', unread: true, messageId: 'msg_1'
+    })]
+  });
+  h.takeSent();
+
+  h.watch({ clear_completed: 1, session_id: 'ses_a' });
+  await new Promise((resolve) => setImmediate(resolve));
+
+  assert.deepEqual(JSON.parse(JSON.stringify(h.actions[0])), {
+    plugin: OPENCODE_UUID,
+    action: 'mark_chat_read',
+    args: { session_id: 'ses_a', message_id: 'msg_1' }
+  });
+  const messages = h.takeSent();
+  assert.ok(messages.some((message) => message.clear_ok === 1));
+  let sessions = h.sessionMessages(messages);
+  assert.equal(sessions[0].flags & 8, 0, 'unread dot cleared');
+  assert.equal(sessions[0].flags & 2, 0, 'attention cleared');
+
+  h.fire('opencode', 'chat_status', {
+    instances: [chatStatusRow('ses_a', 'Krtni Project', {
+      reason: 'Unread', unread: true, messageId: 'msg_1'
+    })]
+  });
+  h.watch({ req: 1 });
+  sessions = h.sessionMessages(h.takeSent());
+  assert.equal(sessions[0].flags & 8, 0, 'stale status does not restore the dot');
+});
+
 test('permission detail routes before replies and approves once', async () => {
   const h = harness();
   h.setPermission({

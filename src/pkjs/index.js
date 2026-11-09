@@ -38,6 +38,7 @@ var state = {
   promptUpload: null,
   markReadInFlight: {},
   markReadDone: {},
+  clearInFlight: {},
   permissionPending: false,
   errors: {},
   known: readObject(KEY_KNOWN, {}),
@@ -1136,6 +1137,16 @@ function decidePermission(sessionId, requestId, decision) {
   });
 }
 
+function markSessionRead(sessionId, messageId) {
+  if (messageId) markReplyViewed(sessionId, messageId);
+  clearUnviewed(sessionId);
+  var fresh = state.chatStatus[sessionId];
+  if (fresh && (!messageId || fresh.messageId === messageId)) {
+    fresh.unread = false;
+    recomputeChatStatus(fresh);
+  }
+}
+
 function markChatRead(sessionId, messageId) {
   if (!sessionId || !messageId) return;
   var entry = replyEntryFor(sessionId);
@@ -1155,17 +1166,43 @@ function markChatRead(sessionId, messageId) {
     state.markReadDone[key] = true;
     var doneKeys = Object.keys(state.markReadDone);
     if (doneKeys.length > 100) delete state.markReadDone[doneKeys[0]];
-    markReplyViewed(sessionId, messageId);
-    clearUnviewed(sessionId);
-    var fresh = state.chatStatus[sessionId];
-    if (fresh && fresh.messageId === messageId) {
-      fresh.unread = false;
-      recomputeChatStatus(fresh);
-    }
+    markSessionRead(sessionId, messageId);
     rebuild();
   }).catch(function (error) {
     state.markReadInFlight[key] = false;
     log('mark read failed: ' + errorCode(error));
+  });
+}
+
+// Clear a completed session from the list without opening it. The phone passes the message ID
+// from the plugin's chat status when it has one, so the plugin marks the completed reply the user
+// saw rather than whichever reply happened to be latest at action time.
+function clearChatRead(sessionId) {
+  if (!sessionId) return;
+  var status = state.chatStatus[sessionId];
+  var messageId = status && status.messageId ? status.messageId : '';
+  var key = 'list|' + sessionId;
+  if (state.clearInFlight[key]) return;
+  state.clearInFlight[key] = true;
+
+  var args = { session_id: sessionId };
+  if (messageId) args.message_id = messageId;
+
+  Promise.resolve().then(function () {
+    return Pebble.invokeAction({
+      plugin: OPENCODE_UUID,
+      action: 'mark_chat_read',
+      args: args
+    });
+  }).then(function () {
+    state.clearInFlight[key] = false;
+    markSessionRead(sessionId, messageId);
+    enqueue({ clear_ok: 1, clear_text: 'Cleared', session_id: sessionId });
+    rebuild(true);
+  }).catch(function (error) {
+    state.clearInFlight[key] = false;
+    enqueue({ clear_ok: 0, clear_text: shortErrorText(error), session_id: sessionId });
+    rebuild(true);
   });
 }
 
@@ -1480,6 +1517,9 @@ function handleWatchMessage(payload) {
   }
   if (payload.mark_read && payload.session_id && payload.detail_message_id) {
     markChatRead(String(payload.session_id), String(payload.detail_message_id));
+  }
+  if (payload.clear_completed && payload.session_id) {
+    clearChatRead(String(payload.session_id));
   }
   if (payload.permission_decision && payload.session_id && payload.permission_request_id) {
     decidePermission(String(payload.session_id), String(payload.permission_request_id),

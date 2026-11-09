@@ -346,13 +346,25 @@ static void list_draw_row(GContext *ctx, const Layer *cell_layer, MenuIndex *cel
 
 static void request_detail(const char *session_id, const char *name, uint8_t flags);
 
+static void request_list_refresh(void) {
+  DictionaryIterator *out;
+  if (app_message_outbox_begin(&out) == APP_MSG_OK) {
+    dict_write_uint8(out, MESSAGE_KEY_req, 1);
+    app_message_outbox_send();
+  }
+}
+
+static void request_clear_completed(const char *session_id) {
+  DictionaryIterator *out;
+  if (app_message_outbox_begin(&out) != APP_MSG_OK) return;
+  dict_write_uint8(out, MESSAGE_KEY_clear_completed, 1);
+  dict_write_cstring(out, MESSAGE_KEY_session_id, session_id);
+  app_message_outbox_send();
+}
+
 static void list_select(MenuLayer *menu_layer, MenuIndex *cell_index, void *data) {
   if (s_session_count == 0) {
-    DictionaryIterator *out;
-    if (app_message_outbox_begin(&out) == APP_MSG_OK) {
-      dict_write_uint8(out, MESSAGE_KEY_req, 1);
-      app_message_outbox_send();
-    }
+    request_list_refresh();
     return;
   }
   if (cell_index->row >= (uint16_t)s_session_count) return;
@@ -361,11 +373,25 @@ static void list_select(MenuLayer *menu_layer, MenuIndex *cell_index, void *data
 }
 
 static void list_select_long(MenuLayer *menu_layer, MenuIndex *cell_index, void *data) {
-  DictionaryIterator *out;
-  if (app_message_outbox_begin(&out) == APP_MSG_OK) {
-    dict_write_uint8(out, MESSAGE_KEY_req, 1);
-    app_message_outbox_send();
+  if (s_session_count == 0 || cell_index->row >= (uint16_t)s_session_count) {
+    request_list_refresh();
+    return;
   }
+  Session *session = &s_sessions[cell_index->row];
+  // The green completion dot is the one status the list can clear without opening the session.
+  // Permission and question dots stay put; they need the detail screen.
+  bool completed = (session->flags & FLAG_UNVIEWED) &&
+                   !(session->flags & (FLAG_PERMISSION | FLAG_QUESTION));
+  if (!completed) {
+    request_list_refresh();
+    return;
+  }
+
+  request_clear_completed(session->id);
+  session->flags &= (uint8_t)~(FLAG_UNVIEWED | FLAG_ATTENTION);
+  copy_clean(s_status_text, sizeof(s_status_text), "Clearing...", true);
+  if (s_list_menu) menu_layer_reload_data(s_list_menu);
+  if (s_footer_layer) layer_mark_dirty(s_footer_layer);
 }
 
 static void footer_update(Layer *layer, GContext *ctx) {
@@ -1276,6 +1302,14 @@ static void handle_result(DictionaryIterator *iter) {
   }
 }
 
+static void handle_clear_result(DictionaryIterator *iter) {
+  int ok = tuple_int(iter, MESSAGE_KEY_clear_ok, 0);
+  const char *text = tuple_string(iter, MESSAGE_KEY_clear_text,
+                                  ok ? "Cleared" : "Could not clear status.");
+  copy_clean(s_status_text, sizeof(s_status_text), text, true);
+  if (s_footer_layer) layer_mark_dirty(s_footer_layer);
+}
+
 static void inbox_received(DictionaryIterator *iter, void *context) {
   if (tuple_int(iter, MESSAGE_KEY_list_begin, 0)) {
     handle_list_begin(iter);
@@ -1319,6 +1353,10 @@ static void inbox_received(DictionaryIterator *iter, void *context) {
     return;
   }
 #endif
+  if (tuple_present(iter, MESSAGE_KEY_clear_ok)) {
+    handle_clear_result(iter);
+    return;
+  }
   if (tuple_present(iter, MESSAGE_KEY_status_text)) {
     copy_clean(s_status_text, sizeof(s_status_text),
                tuple_string(iter, MESSAGE_KEY_status_text, ""), true);
