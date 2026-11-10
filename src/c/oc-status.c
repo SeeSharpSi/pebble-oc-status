@@ -49,6 +49,7 @@
 #define DETAIL_SEND 5
 #define DETAIL_PERMISSION_DECISION 6
 #define DETAIL_QUESTION_TEXT 7
+#define DETAIL_ANSWER_TEXT 8
 #define PROMPT_TEXT_MAX 1024
 #define PROMPT_CHUNK_BYTES 100
 
@@ -113,8 +114,10 @@ static int s_question_description_expected;
 static int s_question_description_next;
 static char s_choice_description[CHOICE_DESCRIPTION_LEN];
 static char s_choice_full_label[128];
-static int s_expanded_choice = -1;
+static int s_answer_detail_choice = -1;
 static bool s_choice_description_loading;
+static TextLayer *s_answer_label_text;
+static TextLayer *s_answer_description_text;
 static AppTimer *s_marquee_timer;
 static int s_marquee_offset;
 #endif
@@ -629,6 +632,13 @@ static void question_marquee_start(void) {
 
 static void show_reply_text(const char *text) {
   if (!s_detail_text || !s_detail_scroll) return;
+  if (s_detail_window) {
+    Layer *root = window_get_root_layer(s_detail_window);
+    GRect bounds = layer_get_bounds(root);
+    int body_pad = PBL_IF_ROUND_ELSE(22, 4);
+    layer_set_frame(text_layer_get_layer(s_detail_text),
+                    GRect(body_pad, 4, bounds.size.w - body_pad * 2, 5000));
+  }
   text_layer_set_text(s_detail_text, text && text[0] ? text : "Nothing to show.");
   GRect frame = layer_get_frame(scroll_layer_get_layer(s_detail_scroll));
   GSize content = text_layer_get_content_size(s_detail_text);
@@ -651,6 +661,13 @@ static void show_incoming_text(const char *text) {
   show_reply_text(s_reply_buffer);
 }
 
+#ifndef PBL_PLATFORM_APLITE
+static void detail_hide_answer_layers(void) {
+  if (s_answer_label_text) layer_set_hidden(text_layer_get_layer(s_answer_label_text), true);
+  if (s_answer_description_text) layer_set_hidden(text_layer_get_layer(s_answer_description_text), true);
+}
+#endif
+
 static void detail_scroll_frame(bool below_prompt) {
   if (!s_detail_window || !s_detail_scroll) return;
   Layer *root = window_get_root_layer(s_detail_window);
@@ -663,10 +680,11 @@ static void detail_scroll_frame(bool below_prompt) {
 static void detail_show_reply_mode(void) {
 #ifndef PBL_PLATFORM_APLITE
   question_marquee_stop();
-  s_expanded_choice = -1;
+  s_answer_detail_choice = -1;
   s_choice_description[0] = '\0';
   s_choice_full_label[0] = '\0';
   s_choice_description_loading = false;
+  detail_hide_answer_layers();
 #endif
   s_detail_mode = DETAIL_REPLY;
   detail_scroll_frame(false);
@@ -686,6 +704,8 @@ static void detail_show_question_mode(void) {
   menu_layer_set_click_config_onto_window(s_choice_menu, s_detail_window);
   if (s_choice_menu) menu_layer_reload_data(s_choice_menu);
 #ifndef PBL_PLATFORM_APLITE
+  detail_hide_answer_layers();
+  s_answer_detail_choice = -1;
   question_marquee_start();
 #endif
 }
@@ -694,7 +714,8 @@ static void detail_show_question_mode(void) {
 static void detail_show_question_text_mode(void) {
   s_detail_mode = DETAIL_QUESTION_TEXT;
   question_marquee_stop();
-  s_expanded_choice = -1;
+  detail_hide_answer_layers();
+  s_answer_detail_choice = -1;
   s_choice_description[0] = '\0';
   s_choice_full_label[0] = '\0';
   s_choice_description_loading = false;
@@ -722,7 +743,8 @@ static void detail_error(const char *text) {
 static void detail_show_send_mode(void) {
   s_detail_mode = DETAIL_SEND;
   question_marquee_stop();
-  s_expanded_choice = -1;
+  detail_hide_answer_layers();
+  s_answer_detail_choice = -1;
   s_answer_pending = false;
   s_question_multi = false;
   s_choice_count = 2;
@@ -747,6 +769,9 @@ static void detail_show_permission_mode(void) {
   s_detail_mode = DETAIL_PERMISSION;
   s_answer_pending = false;
   detail_scroll_frame(false);
+#ifndef PBL_PLATFORM_APLITE
+  detail_hide_answer_layers();
+#endif
   set_detail_header(s_detail_name[0] ? s_detail_name : "Session", "");
   layer_set_hidden(text_layer_get_layer(s_detail_header), false);
   layer_set_hidden(text_layer_get_layer(s_question_prompt), true);
@@ -759,7 +784,8 @@ static void detail_show_permission_decision(void) {
   s_detail_mode = DETAIL_PERMISSION_DECISION;
 #ifndef PBL_PLATFORM_APLITE
   question_marquee_stop();
-  s_expanded_choice = -1;
+  detail_hide_answer_layers();
+  s_answer_detail_choice = -1;
 #endif
   s_answer_pending = false;
   s_question_multi = false;
@@ -782,14 +808,16 @@ static void detail_show_permission_decision(void) {
 
 #ifndef PBL_PLATFORM_APLITE
 static void detail_question_back_click(ClickRecognizerRef recognizer, void *context) {
-  if (s_detail_mode == DETAIL_QUESTION_TEXT) detail_show_question_mode();
+  if (s_detail_mode == DETAIL_QUESTION_TEXT || s_detail_mode == DETAIL_ANSWER_TEXT) {
+    detail_show_question_mode();
+  }
 }
 #endif
 
 static void detail_scroll_click_config(void *context) {
   window_single_click_subscribe(BUTTON_ID_SELECT, detail_select_click);
 #ifndef PBL_PLATFORM_APLITE
-  if (s_detail_mode == DETAIL_QUESTION_TEXT) {
+  if (s_detail_mode == DETAIL_QUESTION_TEXT || s_detail_mode == DETAIL_ANSWER_TEXT) {
     window_single_click_subscribe(BUTTON_ID_BACK, detail_question_back_click);
   }
 #endif
@@ -798,7 +826,7 @@ static void detail_scroll_click_config(void *context) {
 static void detail_select_click(ClickRecognizerRef recognizer, void *context) {
   if (s_answer_pending || s_send_pending || s_prompt_uploading) return;
 #ifndef PBL_PLATFORM_APLITE
-  if (s_detail_mode == DETAIL_QUESTION_TEXT) {
+  if (s_detail_mode == DETAIL_QUESTION_TEXT || s_detail_mode == DETAIL_ANSWER_TEXT) {
     detail_show_question_mode();
     return;
   }
@@ -838,11 +866,6 @@ static int choice_text_x(bool multi) {
   return PBL_IF_ROUND_ELSE(44, 9) + 23;
 }
 
-static int choice_text_width(MenuLayer *menu_layer, bool multi) {
-  GRect bounds = layer_get_bounds(menu_layer_get_layer(menu_layer));
-  return bounds.size.w - choice_text_x(multi) - 8;
-}
-
 static GColor choice_subtext_color(bool highlighted) {
 #ifdef PBL_COLOR
   return highlighted ? GColorLightGray : GColorDarkGray;
@@ -860,25 +883,8 @@ static uint16_t choices_get_num_rows(MenuLayer *menu_layer, uint16_t section_ind
   return rows > 0 ? (uint16_t)rows : 1;
 }
 
-static int choice_row_height(MenuLayer *menu_layer, int index) {
-  if (index != s_expanded_choice) return CHOICE_ROW_HEIGHT;
-  int width = choice_text_width(menu_layer, s_question_multi);
-  const char *label_text = s_choice_full_label[0] ? s_choice_full_label : s_choices[index].label;
-  GSize label = text_size(label_text, fonts_get_system_font(FONT_KEY_GOTHIC_18), width, true);
-  const char *description = s_choice_description[0] ? s_choice_description :
-                            s_choice_description_loading ? "Loading description..." : "No description.";
-  GSize sub = text_size(description, fonts_get_system_font(FONT_KEY_GOTHIC_14), width, true);
-  int height = 6 + label.h + 3 + sub.h + 6;
-  if (height < CHOICE_ROW_HEIGHT) height = CHOICE_ROW_HEIGHT;
-  if (height > 260) height = 260;
-  return height;
-}
-
 static int16_t choices_get_cell_height(MenuLayer *menu_layer, MenuIndex *cell_index, void *data) {
-  if (choices_question_mode() && cell_index->row == 0) return QUESTION_ROW_HEIGHT;
-  int index = (int)cell_index->row - choices_base_row();
-  if (index < 0 || index >= s_choice_count) return CHOICE_ROW_HEIGHT;
-  return choice_row_height(menu_layer, index);
+  return choices_question_mode() && cell_index->row == 0 ? QUESTION_ROW_HEIGHT : CHOICE_ROW_HEIGHT;
 }
 
 static void draw_question_row(GContext *ctx, const Layer *cell_layer, GRect bounds, bool highlighted) {
@@ -914,30 +920,10 @@ static void draw_choice_row(GContext *ctx, const Layer *cell_layer, GRect bounds
   }
 
   graphics_context_set_text_color(ctx, fg);
-  if (index != s_expanded_choice) {
-    graphics_draw_text(ctx, s_choices[index].label,
-                       fonts_get_system_font(FONT_KEY_GOTHIC_18),
-                       GRect(text_x, 7, bounds.size.w - text_x - 8, 26),
-                       GTextOverflowModeTrailingEllipsis, GTextAlignmentLeft, NULL);
-    return;
-  }
-
-  int width = bounds.size.w - text_x - 8;
-  const char *label_text = s_choice_full_label[0] ? s_choice_full_label : s_choices[index].label;
-  GSize label = text_size(label_text,
-                          fonts_get_system_font(FONT_KEY_GOTHIC_18), width, true);
-  graphics_draw_text(ctx, label_text,
+  graphics_draw_text(ctx, s_choices[index].label,
                      fonts_get_system_font(FONT_KEY_GOTHIC_18),
-                     GRect(text_x, 6, width, label.h + 2),
-                     GTextOverflowModeWordWrap, GTextAlignmentLeft, NULL);
-  const char *description = s_choice_description[0] ? s_choice_description :
-                            s_choice_description_loading ? "Loading description..." : "No description.";
-  graphics_context_set_text_color(ctx, choice_subtext_color(highlighted));
-  graphics_draw_text(ctx, description,
-                     fonts_get_system_font(FONT_KEY_GOTHIC_14),
-                     GRect(text_x, 6 + label.h + 3, width,
-                           bounds.size.h - (6 + label.h + 3) - 4),
-                     GTextOverflowModeWordWrap, GTextAlignmentLeft, NULL);
+                     GRect(text_x, 7, bounds.size.w - text_x - 8, 26),
+                     GTextOverflowModeTrailingEllipsis, GTextAlignmentLeft, NULL);
 }
 
 static void choices_draw_row(GContext *ctx, const Layer *cell_layer, MenuIndex *cell_index, void *data) {
@@ -1055,11 +1041,55 @@ static void send_permission_decision(int row) {
 }
 
 #ifndef PBL_PLATFORM_APLITE
+static void layout_answer_detail(bool reset_offset) {
+  if (!s_detail_scroll || !s_detail_text || !s_answer_label_text || !s_answer_description_text) return;
+  if (s_answer_detail_choice < 0 || s_answer_detail_choice >= s_choice_count) return;
+  Layer *root = window_get_root_layer(s_detail_window);
+  GRect bounds = layer_get_bounds(root);
+  int pad = PBL_IF_ROUND_ELSE(22, 4);
+  int width = bounds.size.w - pad * 2;
+  int y = 4;
+
+  const char *question = question_row_text();
+  text_layer_set_text(s_detail_text, question);
+  GSize q = text_size(question, fonts_get_system_font(FONT_KEY_GOTHIC_18), width, true);
+  layer_set_frame(text_layer_get_layer(s_detail_text), GRect(pad, y, width, q.h + 2));
+  y += q.h + 10;
+
+  const char *label = s_choice_full_label[0] ? s_choice_full_label :
+                      s_choices[s_answer_detail_choice].label;
+  text_layer_set_text(s_answer_label_text, label);
+  GSize a = text_size(label, fonts_get_system_font(FONT_KEY_GOTHIC_18_BOLD), width, true);
+  layer_set_frame(text_layer_get_layer(s_answer_label_text), GRect(pad, y, width, a.h + 2));
+  layer_set_hidden(text_layer_get_layer(s_answer_label_text), false);
+  y += a.h + 4;
+
+  const char *description = s_choice_description[0] ? s_choice_description :
+                            s_choice_description_loading ? "Loading description..." : "No description.";
+  text_layer_set_text(s_answer_description_text, description);
+  GSize d = text_size(description, fonts_get_system_font(FONT_KEY_GOTHIC_14), width, true);
+  layer_set_frame(text_layer_get_layer(s_answer_description_text), GRect(pad, y, width, d.h + 2));
+  layer_set_hidden(text_layer_get_layer(s_answer_description_text), false);
+  y += d.h + 8;
+
+  scroll_layer_set_content_size(s_detail_scroll, GSize(bounds.size.w, y));
+  if (reset_offset) {
+    scroll_layer_set_content_offset(s_detail_scroll, GPoint(0, 0), false);
+  } else {
+    scroll_layer_set_content_offset(s_detail_scroll,
+                                    scroll_layer_get_content_offset(s_detail_scroll), false);
+  }
+}
+
 static void request_choice_detail(int index) {
   DictionaryIterator *out;
   if (app_message_outbox_begin(&out) != APP_MSG_OK) {
     s_choice_description_loading = false;
-    if (s_choice_menu) menu_layer_reload_data(s_choice_menu);
+    if (s_detail_mode == DETAIL_ANSWER_TEXT) {
+      layout_answer_detail(false);
+    } else if (s_choice_menu) {
+      menu_layer_reload_data(s_choice_menu);
+    }
     return;
   }
   dict_write_uint8(out, MESSAGE_KEY_choice_detail_req, 1);
@@ -1068,22 +1098,23 @@ static void request_choice_detail(int index) {
   app_message_outbox_send();
 }
 
-static void toggle_choice_expanded(int index) {
-  if (index < 0 || index >= s_choice_count || s_choices[index].done) return;
-  if (s_expanded_choice == index) {
-    s_expanded_choice = -1;
-    s_choice_description[0] = '\0';
-    s_choice_full_label[0] = '\0';
-    s_choice_description_loading = false;
-  } else {
-    s_expanded_choice = index;
-    question_marquee_stop();
-    s_choice_description[0] = '\0';
-    s_choice_full_label[0] = '\0';
-    s_choice_description_loading = true;
-    request_choice_detail(index);
-  }
-  if (s_choice_menu) menu_layer_reload_data(s_choice_menu);
+static void detail_show_answer_text_mode(int index) {
+  if (index < 0 || index >= s_choice_count) return;
+  s_detail_mode = DETAIL_ANSWER_TEXT;
+  question_marquee_stop();
+  s_answer_detail_choice = index;
+  s_choice_description[0] = '\0';
+  s_choice_full_label[0] = '\0';
+  s_choice_description_loading = true;
+  set_detail_header(s_detail_name[0] ? s_detail_name : "Session", "");
+  layer_set_hidden(text_layer_get_layer(s_detail_header), false);
+  layer_set_hidden(text_layer_get_layer(s_question_prompt), false);
+  layer_set_hidden(menu_layer_get_layer(s_choice_menu), true);
+  detail_scroll_frame(true);
+  layer_set_hidden(scroll_layer_get_layer(s_detail_scroll), false);
+  scroll_layer_set_click_config_onto_window(s_detail_scroll, s_detail_window);
+  layout_answer_detail(true);
+  request_choice_detail(index);
 }
 
 static void choices_select(MenuLayer *menu_layer, MenuIndex *cell_index, void *data) {
@@ -1111,7 +1142,7 @@ static void choices_select_long(MenuLayer *menu_layer, MenuIndex *cell_index, vo
     detail_show_question_text_mode();
     return;
   }
-  toggle_choice_expanded((int)cell_index->row - 1);
+  detail_show_answer_text_mode((int)cell_index->row - 1);
 }
 
 static void choices_selection_changed(MenuLayer *menu_layer, MenuIndex new_index,
@@ -1194,6 +1225,23 @@ static void detail_window_load(Window *window) {
   text_layer_set_background_color(s_detail_text, GColorClear);
   text_layer_set_overflow_mode(s_detail_text, GTextOverflowModeWordWrap);
   scroll_layer_add_child(s_detail_scroll, text_layer_get_layer(s_detail_text));
+#ifndef PBL_PLATFORM_APLITE
+  s_answer_label_text = text_layer_create(GRect(body_pad, 0, bounds.size.w - body_pad * 2, 0));
+  text_layer_set_font(s_answer_label_text, fonts_get_system_font(FONT_KEY_GOTHIC_18_BOLD));
+  text_layer_set_text_color(s_answer_label_text, GColorBlack);
+  text_layer_set_background_color(s_answer_label_text, GColorClear);
+  text_layer_set_overflow_mode(s_answer_label_text, GTextOverflowModeWordWrap);
+  layer_set_hidden(text_layer_get_layer(s_answer_label_text), true);
+  scroll_layer_add_child(s_detail_scroll, text_layer_get_layer(s_answer_label_text));
+
+  s_answer_description_text = text_layer_create(GRect(body_pad, 0, bounds.size.w - body_pad * 2, 0));
+  text_layer_set_font(s_answer_description_text, fonts_get_system_font(FONT_KEY_GOTHIC_14));
+  text_layer_set_text_color(s_answer_description_text, choice_subtext_color(false));
+  text_layer_set_background_color(s_answer_description_text, GColorClear);
+  text_layer_set_overflow_mode(s_answer_description_text, GTextOverflowModeWordWrap);
+  layer_set_hidden(text_layer_get_layer(s_answer_description_text), true);
+  scroll_layer_add_child(s_detail_scroll, text_layer_get_layer(s_answer_description_text));
+#endif
   layer_add_child(root, scroll_layer_get_layer(s_detail_scroll));
 
   s_question_prompt = text_layer_create(GRect(body_pad, DETAIL_BODY_Y,
@@ -1229,7 +1277,7 @@ static void detail_window_load(Window *window) {
   s_question_description[0] = '\0';
   s_question_description_expected = 0;
   s_question_description_next = 0;
-  s_expanded_choice = -1;
+  s_answer_detail_choice = -1;
   s_choice_description[0] = '\0';
   s_choice_full_label[0] = '\0';
   s_choice_description_loading = false;
@@ -1280,6 +1328,16 @@ static void detail_window_unload(Window *window) {
   s_detail_scroll = NULL;
   text_layer_destroy(s_detail_text);
   s_detail_text = NULL;
+#ifndef PBL_PLATFORM_APLITE
+  if (s_answer_label_text) {
+    text_layer_destroy(s_answer_label_text);
+    s_answer_label_text = NULL;
+  }
+  if (s_answer_description_text) {
+    text_layer_destroy(s_answer_description_text);
+    s_answer_description_text = NULL;
+  }
+#endif
   text_layer_destroy(s_question_prompt);
   s_question_prompt = NULL;
   menu_layer_destroy(s_choice_menu);
@@ -1300,7 +1358,7 @@ static void request_detail(const char *session_id, const char *name, uint8_t fla
   s_question_description[0] = '\0';
   s_question_description_expected = 0;
   s_question_description_next = 0;
-  s_expanded_choice = -1;
+  s_answer_detail_choice = -1;
   s_choice_description[0] = '\0';
   s_choice_full_label[0] = '\0';
   s_choice_description_loading = false;
@@ -1615,7 +1673,7 @@ static void handle_detail(DictionaryIterator *iter) {
     s_question_description[0] = '\0';
     s_question_description_expected = tuple_int(iter, MESSAGE_KEY_question_description_count, 0);
     s_question_description_next = 0;
-      s_expanded_choice = -1;
+      s_answer_detail_choice = -1;
     s_choice_description[0] = '\0';
     s_choice_full_label[0] = '\0';
     s_choice_description_loading = false;
@@ -1721,16 +1779,16 @@ static void handle_question_description(DictionaryIterator *iter) {
 }
 
 static void handle_choice_detail(DictionaryIterator *iter) {
-  if (!s_detail_open || s_detail_mode != DETAIL_QUESTION || !detail_matches(iter)) return;
-  if (s_expanded_choice < 0) return;
-  int index = tuple_int(iter, MESSAGE_KEY_choice_index, s_expanded_choice);
-  if (index != s_expanded_choice) return;
+  if (!s_detail_open || s_detail_mode != DETAIL_ANSWER_TEXT || !detail_matches(iter)) return;
+  if (s_answer_detail_choice < 0) return;
+  int index = tuple_int(iter, MESSAGE_KEY_choice_index, s_answer_detail_choice);
+  if (index != s_answer_detail_choice) return;
   copy_clean(s_choice_full_label, sizeof(s_choice_full_label),
              tuple_string(iter, MESSAGE_KEY_choice_label, s_choices[index].label), true);
   copy_clean(s_choice_description, sizeof(s_choice_description),
              tuple_string(iter, MESSAGE_KEY_choice_description, ""), true);
   s_choice_description_loading = false;
-  if (s_choice_menu) menu_layer_reload_data(s_choice_menu);
+  layout_answer_detail(false);
 }
 #endif
 
