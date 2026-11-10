@@ -18,9 +18,10 @@ plugin knows about and lets you open them from the watch.
 - A session with a question opens the question as a list of choices. Select a choice to answer it
   through the plugin's `answer_question` action.
 - The question text is the first row in the choices list. When selected it scrolls right-to-left to
-  reveal the full text. Long-press Select expands the question into wrapped text; long-press an
-  answer to expand it and show the answer's gray description from OpenCode. Short Select still
-  answers a choice. Aplite keeps the simpler one-line question list.
+  reveal the full text. Long-press Select opens the full question in a scrollable text view; Back or
+  Select returns to the choices. Long-press an answer to expand it and show the answer's gray
+  description from OpenCode. Short Select still answers a choice. Aplite keeps the simpler one-line
+  question list.
 - Otherwise the detail screen shows the latest reply text, with scrolling for longer replies. When
   the reply is displayed, the app marks it read on the watch.
 - On a reply detail, Select starts dictation. Running sessions offer **Queue after run** or

@@ -48,6 +48,7 @@
 #define DETAIL_PERMISSION 4
 #define DETAIL_SEND 5
 #define DETAIL_PERMISSION_DECISION 6
+#define DETAIL_QUESTION_TEXT 7
 #define PROMPT_TEXT_MAX 1024
 #define PROMPT_CHUNK_BYTES 100
 
@@ -113,7 +114,6 @@ static int s_question_description_next;
 static char s_choice_description[CHOICE_DESCRIPTION_LEN];
 static char s_choice_full_label[128];
 static int s_expanded_choice = -1;
-static bool s_question_expanded;
 static bool s_choice_description_loading;
 static AppTimer *s_marquee_timer;
 static int s_marquee_offset;
@@ -583,7 +583,7 @@ static const char *question_row_text(void) {
 
 static void question_marquee_tick(void *data) {
   s_marquee_timer = NULL;
-  if (!s_detail_open || !s_choice_menu || s_detail_mode != DETAIL_QUESTION || s_question_expanded) {
+  if (!s_detail_open || !s_choice_menu || s_detail_mode != DETAIL_QUESTION) {
     s_marquee_offset = 0;
     return;
   }
@@ -615,7 +615,7 @@ static void question_marquee_stop(void) {
 
 static void question_marquee_start(void) {
   question_marquee_stop();
-  if (!s_detail_open || !s_choice_menu || s_detail_mode != DETAIL_QUESTION || s_question_expanded) return;
+  if (!s_detail_open || !s_choice_menu || s_detail_mode != DETAIL_QUESTION) return;
   MenuIndex selected = menu_layer_get_selected_index(s_choice_menu);
   if (selected.row != 0) return;
   int width = text_size(question_row_text(), fonts_get_system_font(FONT_KEY_GOTHIC_18),
@@ -651,14 +651,25 @@ static void show_incoming_text(const char *text) {
   show_reply_text(s_reply_buffer);
 }
 
+static void detail_scroll_frame(bool below_prompt) {
+  if (!s_detail_window || !s_detail_scroll) return;
+  Layer *root = window_get_root_layer(s_detail_window);
+  GRect bounds = layer_get_bounds(root);
+  int top = DETAIL_BODY_Y + (below_prompt ? QUESTION_PROMPT_HEIGHT : 0);
+  scroll_layer_set_frame(s_detail_scroll,
+                         GRect(0, top, bounds.size.w, bounds.size.h - top));
+}
+
 static void detail_show_reply_mode(void) {
 #ifndef PBL_PLATFORM_APLITE
   question_marquee_stop();
-  s_question_expanded = false;
   s_expanded_choice = -1;
+  s_choice_description[0] = '\0';
+  s_choice_full_label[0] = '\0';
   s_choice_description_loading = false;
 #endif
   s_detail_mode = DETAIL_REPLY;
+  detail_scroll_frame(false);
   layer_set_hidden(text_layer_get_layer(s_detail_header), false);
   layer_set_hidden(text_layer_get_layer(s_question_prompt), true);
   layer_set_hidden(scroll_layer_get_layer(s_detail_scroll), false);
@@ -679,6 +690,25 @@ static void detail_show_question_mode(void) {
 #endif
 }
 
+#ifndef PBL_PLATFORM_APLITE
+static void detail_show_question_text_mode(void) {
+  s_detail_mode = DETAIL_QUESTION_TEXT;
+  question_marquee_stop();
+  s_expanded_choice = -1;
+  s_choice_description[0] = '\0';
+  s_choice_full_label[0] = '\0';
+  s_choice_description_loading = false;
+  set_detail_header(s_detail_name[0] ? s_detail_name : "Session", "");
+  layer_set_hidden(text_layer_get_layer(s_detail_header), false);
+  layer_set_hidden(text_layer_get_layer(s_question_prompt), false);
+  layer_set_hidden(menu_layer_get_layer(s_choice_menu), true);
+  detail_scroll_frame(true);
+  layer_set_hidden(scroll_layer_get_layer(s_detail_scroll), false);
+  scroll_layer_set_click_config_onto_window(s_detail_scroll, s_detail_window);
+  show_reply_text(question_row_text());
+}
+#endif
+
 static void detail_error(const char *text) {
   s_send_pending = false;
   s_prompt_uploading = false;
@@ -692,7 +722,6 @@ static void detail_error(const char *text) {
 static void detail_show_send_mode(void) {
   s_detail_mode = DETAIL_SEND;
   question_marquee_stop();
-  s_question_expanded = false;
   s_expanded_choice = -1;
   s_answer_pending = false;
   s_question_multi = false;
@@ -717,6 +746,7 @@ static void detail_show_send_mode(void) {
 static void detail_show_permission_mode(void) {
   s_detail_mode = DETAIL_PERMISSION;
   s_answer_pending = false;
+  detail_scroll_frame(false);
   set_detail_header(s_detail_name[0] ? s_detail_name : "Session", "");
   layer_set_hidden(text_layer_get_layer(s_detail_header), false);
   layer_set_hidden(text_layer_get_layer(s_question_prompt), true);
@@ -729,7 +759,6 @@ static void detail_show_permission_decision(void) {
   s_detail_mode = DETAIL_PERMISSION_DECISION;
 #ifndef PBL_PLATFORM_APLITE
   question_marquee_stop();
-  s_question_expanded = false;
   s_expanded_choice = -1;
 #endif
   s_answer_pending = false;
@@ -751,12 +780,29 @@ static void detail_show_permission_decision(void) {
   if (s_choice_menu) menu_layer_reload_data(s_choice_menu);
 }
 
+#ifndef PBL_PLATFORM_APLITE
+static void detail_question_back_click(ClickRecognizerRef recognizer, void *context) {
+  if (s_detail_mode == DETAIL_QUESTION_TEXT) detail_show_question_mode();
+}
+#endif
+
 static void detail_scroll_click_config(void *context) {
   window_single_click_subscribe(BUTTON_ID_SELECT, detail_select_click);
+#ifndef PBL_PLATFORM_APLITE
+  if (s_detail_mode == DETAIL_QUESTION_TEXT) {
+    window_single_click_subscribe(BUTTON_ID_BACK, detail_question_back_click);
+  }
+#endif
 }
 
 static void detail_select_click(ClickRecognizerRef recognizer, void *context) {
   if (s_answer_pending || s_send_pending || s_prompt_uploading) return;
+#ifndef PBL_PLATFORM_APLITE
+  if (s_detail_mode == DETAIL_QUESTION_TEXT) {
+    detail_show_question_mode();
+    return;
+  }
+#endif
   if (s_detail_mode == DETAIL_PERMISSION) {
     detail_show_permission_decision();
     return;
@@ -814,17 +860,6 @@ static uint16_t choices_get_num_rows(MenuLayer *menu_layer, uint16_t section_ind
   return rows > 0 ? (uint16_t)rows : 1;
 }
 
-static int question_row_height(MenuLayer *menu_layer) {
-  if (!s_question_expanded) return QUESTION_ROW_HEIGHT;
-  GRect bounds = layer_get_bounds(menu_layer_get_layer(menu_layer));
-  int width = bounds.size.w - question_text_x() - 8;
-  GSize size = text_size(question_row_text(), fonts_get_system_font(FONT_KEY_GOTHIC_18), width, true);
-  int height = size.h + 12;
-  if (height < QUESTION_ROW_HEIGHT) height = QUESTION_ROW_HEIGHT;
-  if (height > 320) height = 320;
-  return height;
-}
-
 static int choice_row_height(MenuLayer *menu_layer, int index) {
   if (index != s_expanded_choice) return CHOICE_ROW_HEIGHT;
   int width = choice_text_width(menu_layer, s_question_multi);
@@ -840,7 +875,7 @@ static int choice_row_height(MenuLayer *menu_layer, int index) {
 }
 
 static int16_t choices_get_cell_height(MenuLayer *menu_layer, MenuIndex *cell_index, void *data) {
-  if (choices_question_mode() && cell_index->row == 0) return question_row_height(menu_layer);
+  if (choices_question_mode() && cell_index->row == 0) return QUESTION_ROW_HEIGHT;
   int index = (int)cell_index->row - choices_base_row();
   if (index < 0 || index >= s_choice_count) return CHOICE_ROW_HEIGHT;
   return choice_row_height(menu_layer, index);
@@ -851,13 +886,6 @@ static void draw_question_row(GContext *ctx, const Layer *cell_layer, GRect boun
   graphics_context_set_text_color(ctx, fg);
   int x = question_text_x();
   int width = bounds.size.w - x - 8;
-  if (s_question_expanded) {
-    graphics_draw_text(ctx, question_row_text(),
-                       fonts_get_system_font(FONT_KEY_GOTHIC_18),
-                       GRect(x, 6, width, bounds.size.h - 12),
-                       GTextOverflowModeWordWrap, GTextAlignmentLeft, NULL);
-    return;
-  }
   int offset = highlighted ? s_marquee_offset : 0;
   graphics_draw_text(ctx, question_row_text(),
                      fonts_get_system_font(FONT_KEY_GOTHIC_18),
@@ -1040,20 +1068,6 @@ static void request_choice_detail(int index) {
   app_message_outbox_send();
 }
 
-static void toggle_question_expanded(void) {
-  s_question_expanded = !s_question_expanded;
-  if (s_question_expanded) {
-    question_marquee_stop();
-    s_expanded_choice = -1;
-    s_choice_description[0] = '\0';
-    s_choice_full_label[0] = '\0';
-    s_choice_description_loading = false;
-  } else {
-    question_marquee_start();
-  }
-  if (s_choice_menu) menu_layer_reload_data(s_choice_menu);
-}
-
 static void toggle_choice_expanded(int index) {
   if (index < 0 || index >= s_choice_count || s_choices[index].done) return;
   if (s_expanded_choice == index) {
@@ -1063,7 +1077,6 @@ static void toggle_choice_expanded(int index) {
     s_choice_description_loading = false;
   } else {
     s_expanded_choice = index;
-    s_question_expanded = false;
     question_marquee_stop();
     s_choice_description[0] = '\0';
     s_choice_full_label[0] = '\0';
@@ -1095,7 +1108,7 @@ static void choices_select(MenuLayer *menu_layer, MenuIndex *cell_index, void *d
 static void choices_select_long(MenuLayer *menu_layer, MenuIndex *cell_index, void *data) {
   if (!choices_question_mode()) return;
   if (cell_index->row == 0) {
-    toggle_question_expanded();
+    detail_show_question_text_mode();
     return;
   }
   toggle_choice_expanded((int)cell_index->row - 1);
@@ -1103,7 +1116,7 @@ static void choices_select_long(MenuLayer *menu_layer, MenuIndex *cell_index, vo
 
 static void choices_selection_changed(MenuLayer *menu_layer, MenuIndex new_index,
                                      MenuIndex old_index, void *data) {
-  if (choices_question_mode() && new_index.row == 0 && !s_question_expanded) {
+  if (choices_question_mode() && new_index.row == 0) {
     question_marquee_start();
   } else {
     question_marquee_stop();
@@ -1216,7 +1229,6 @@ static void detail_window_load(Window *window) {
   s_question_description[0] = '\0';
   s_question_description_expected = 0;
   s_question_description_next = 0;
-  s_question_expanded = false;
   s_expanded_choice = -1;
   s_choice_description[0] = '\0';
   s_choice_full_label[0] = '\0';
@@ -1288,7 +1300,6 @@ static void request_detail(const char *session_id, const char *name, uint8_t fla
   s_question_description[0] = '\0';
   s_question_description_expected = 0;
   s_question_description_next = 0;
-  s_question_expanded = false;
   s_expanded_choice = -1;
   s_choice_description[0] = '\0';
   s_choice_full_label[0] = '\0';
@@ -1604,8 +1615,7 @@ static void handle_detail(DictionaryIterator *iter) {
     s_question_description[0] = '\0';
     s_question_description_expected = tuple_int(iter, MESSAGE_KEY_question_description_count, 0);
     s_question_description_next = 0;
-    s_question_expanded = false;
-    s_expanded_choice = -1;
+      s_expanded_choice = -1;
     s_choice_description[0] = '\0';
     s_choice_full_label[0] = '\0';
     s_choice_description_loading = false;
