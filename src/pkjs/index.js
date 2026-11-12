@@ -230,7 +230,7 @@ function readSourceOnce(category, item, options) {
   var maxAgeMs = options && options.maxAgeMs !== undefined ?
     Number(options.maxAgeMs) : SOURCE_READ_CACHE_MS;
   var cached = sourceReadCache[key];
-  if (cached && Date.now() - cached.at <= maxAgeMs) {
+  if (maxAgeMs > 0 && cached && Date.now() - cached.at <= maxAgeMs) {
     return Promise.resolve(cached.envelope);
   }
   if (sourceReadInFlight[key]) return sourceReadInFlight[key];
@@ -995,7 +995,7 @@ function waitingText(sessionId) {
 }
 
 function refreshFocusedReply(sessionId, sendFallback) {
-  readSourceOnce('opencode', 'reply').then(function (envelope) {
+  readSourceOnce('opencode', 'reply', { maxAgeMs: 0 }).then(function (envelope) {
     applyReply(envelope, true);
     if (state.detailSession !== sessionId || state.detailKind === 'question') return;
     var entry = replyEntryFor(sessionId);
@@ -1025,40 +1025,40 @@ function refreshReplyForDetail(sessionId) {
   var focusedSession = !!(entry && (entry.isDefault ||
     (state.reply && state.reply.sessionId === sessionId)));
   if (entry && entry.hasText) {
+    // Show the cached reply immediately, then replace it when a fresh source read arrives.
     sendReplyDetail(sessionId);
-    if (focusedSession) refreshFocusedReply(sessionId, false);
-    return;
-  }
-  if (entry && focusedSession) {
-    refreshFocusedReply(sessionId, true);
-    return;
+  } else {
+    sendMessageDetail(sessionId, nameFor(sessionId), 'Loading', 'Fetching the latest reply...',
+      'reply');
   }
 
-  sendMessageDetail(sessionId, nameFor(sessionId), 'Loading', 'Fetching the latest reply...',
-    'reply');
-
-  readSourceOnce('opencode', 'replies').then(function (envelope) {
+  // The replies subscription only refreshes every 60 seconds. Never trust the cached entry alone:
+  // a session that just finished a reply would otherwise keep showing the app-open snapshot.
+  readSourceOnce('opencode', 'replies', { maxAgeMs: 0 }).then(function (envelope) {
     onReplies(envelope);
     if (state.detailSession !== sessionId || state.detailKind !== 'reply') return;
     var fresh = replyEntryFor(sessionId);
+    var focused = !!(fresh && (fresh.isDefault ||
+      (state.reply && state.reply.sessionId === sessionId)));
     if (fresh && fresh.hasText) {
       maybeUpdateOpenReply(fresh);
-      if (fresh.isDefault || (state.reply && state.reply.sessionId === sessionId)) {
-        refreshFocusedReply(sessionId, false);
-      }
-    } else if (fresh && (fresh.isDefault ||
-               (state.reply && state.reply.sessionId === sessionId))) {
+      if (focused) refreshFocusedReply(sessionId, false);
+    } else if (focused) {
       refreshFocusedReply(sessionId, true);
-    } else if (fresh) {
-      sendMessageDetail(sessionId, nameFor(sessionId), fresh.status || 'No reply',
-        noReplyMessage(sessionId), 'reply');
-    } else {
-      sendMessageDetail(sessionId, nameFor(sessionId), 'No reply',
-        noReplyMessage(sessionId), 'reply');
+    } else if (!entry || !entry.hasText) {
+      if (fresh) {
+        sendMessageDetail(sessionId, nameFor(sessionId), fresh.status || 'No reply',
+          noReplyMessage(sessionId), 'reply');
+      } else {
+        sendMessageDetail(sessionId, nameFor(sessionId), 'No reply',
+          noReplyMessage(sessionId), 'reply');
+      }
     }
   }).catch(function (error) {
     state.errors.replies = errorCode(error);
-    if (state.detailSession === sessionId && state.detailKind === 'reply') {
+    // Keep a cached reply visible when only the refresh failed.
+    if ((!entry || !entry.hasText) && state.detailSession === sessionId &&
+        state.detailKind === 'reply') {
       sendMessageDetail(sessionId, nameFor(sessionId), 'Replies unavailable',
         shortErrorText(error), 'reply');
     }

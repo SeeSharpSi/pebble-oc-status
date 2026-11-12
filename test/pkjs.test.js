@@ -580,6 +580,32 @@ test('a cached entry without text is refreshed before showing no reply', async (
   );
 });
 
+test('opening a cached reply refreshes it from the replies source', async () => {
+  const h = harness();
+  h.setReplies({ instances: [replyRow('ses_a', 'Krtni Project', 'msg_old', 'Old reply')] });
+  h.fire('opencode', 'replies', {
+    instances: [replyRow('ses_a', 'Krtni Project', 'msg_old', 'Old reply')]
+  });
+  h.takeSent();
+
+  h.watch({ detail_req: 1, session_id: 'ses_a' });
+  await new Promise((resolve) => setImmediate(resolve));
+  h.takeSent();
+
+  h.setReplies({ instances: [replyRow('ses_a', 'Krtni Project', 'msg_new', 'Newest reply')] });
+  h.watch({ detail_req: 1, session_id: 'ses_a' });
+  await new Promise((resolve) => setImmediate(resolve));
+
+  const messages = h.takeSent();
+  const starts = messages.map((message, index) => message.detail_kind === 1 ? index : -1)
+    .filter((index) => index >= 0);
+  assert.equal(starts.length, 2, 'cached reply then fresh reply');
+  const chunks = messages.slice(starts[starts.length - 1])
+    .filter((message) => message.reply_chunk)
+    .map((message) => message.reply_chunk).join('');
+  assert.equal(chunks, 'Newest reply');
+});
+
 test('question text and answer descriptions are sent to the watch', () => {
   const h = harness();
   const questionText = 'I found an uncommitted user edit in games/catan/info.json: the tagline is now "Trade, build, settle. But hexagons." Include it in this deploy or leave it uncommitted?';

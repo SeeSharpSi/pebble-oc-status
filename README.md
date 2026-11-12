@@ -66,10 +66,11 @@ phone passes the message ID from `chat_status` so the same exact reply is marked
 session is running, an earlier unread reply is superseded: the row shows the spinner and does not
 count as attention. Permission and question requests still take priority.
 
-Reply text is fetched from `opencode/replies` on demand when a session is opened, then cached. The
-focused `opencode/reply` source still refreshes the default or last-sent session every 20 seconds.
-Older sessions outside the monitored set have no reply text; raise **Recent replies** in the plugin
-settings to monitor more sessions.
+Reply text is fetched from `opencode/replies` on demand when a session is opened, then cached. Every
+open also forces a fresh replies read: cached text appears immediately and is replaced if the session
+has a newer reply. The focused `opencode/reply` source still refreshes the default or last-sent
+session every 20 seconds. Older sessions outside the monitored set have no reply text; raise
+**Recent replies** in the plugin settings to monitor more sessions.
 
 On-demand reads share one in-flight request, cache their envelope for 10 seconds, and wait 25 seconds
 before timing out, longer than the phone's 20-second plugin request timeout. If a plugin update
