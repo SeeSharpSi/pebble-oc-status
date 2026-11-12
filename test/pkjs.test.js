@@ -591,7 +591,7 @@ test('showConfiguration opens the hosted settings page', () => {
   assert.equal(h.opened.length, 1);
   assert.equal(
     h.opened[0],
-    'https://seesharpssi.github.io/pebble-oc-status/config.html?poll_rate=0&only_action=0'
+    'https://seesharpsi.github.io/pebble-oc-status/config.html?poll_rate=0&only_action=0'
   );
 });
 
