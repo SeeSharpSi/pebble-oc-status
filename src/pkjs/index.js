@@ -1222,17 +1222,35 @@ function maybeAutoMarkRead() {
     state.autoReadChecked = true;
     return;
   }
-  if (!Object.keys(state.chatStatus).length) return;
+  if (!Object.keys(state.chatStatus).length && !Object.keys(state.unviewed).length) return;
   state.autoReadChecked = true;
   var now = Math.floor(Date.now() / 1000);
-  Object.keys(state.chatStatus).forEach(function (sessionId) {
+  var ids = {};
+  Object.keys(state.chatStatus).forEach(function (id) { ids[id] = true; });
+  Object.keys(state.unviewed).forEach(function (id) { ids[id] = true; });
+  Object.keys(ids).forEach(function (sessionId) {
     var status = state.chatStatus[sessionId];
-    if (!status || !status.unread) return;
-    if (status.permissionCount > 0 || status.questionCount > 0) return;
-    if (status.reason === 'Permission' || status.reason === 'Question') return;
-    if (!status.updated) return;
-    if (now - status.updated < state.markReadAfterSec) return;
-    autoMarkRead(sessionId, status.messageId || '');
+    var updated = 0;
+    var messageId = '';
+    var unread = false;
+    if (status) {
+      if (!status.unread) return;
+      if (status.permissionCount > 0 || status.questionCount > 0) return;
+      if (status.reason === 'Permission' || status.reason === 'Question') return;
+      updated = status.updated;
+      messageId = status.messageId || '';
+      unread = true;
+    } else {
+      if (!state.unviewed[sessionId]) return;
+      var known = state.known[sessionId];
+      updated = known && known.updated ? known.updated : 0;
+      unread = true;
+    }
+    if (!unread || !updated) return;
+    if (state.questions[sessionId] && state.questions[sessionId].length) return;
+    if (state.permissions[sessionId] && state.permissions[sessionId].length) return;
+    if (now - updated < state.markReadAfterSec) return;
+    autoMarkRead(sessionId, messageId);
   });
 }
 
