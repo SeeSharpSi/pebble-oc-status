@@ -20,7 +20,7 @@ plugin knows about and lets you open them from the watch.
 - The question text is the first row in the choices list. When selected it scrolls right-to-left to
   reveal the full text. Long-press Select opens the full question in a scrollable text view; Back or
   Select returns to the choices. Long-press an answer to open a scrollable answer view with the
-  question, the full answer, and the answer's gray description from OpenCode. Short Select still
+  full answer in bold and the answer's gray description from OpenCode underneath. Short Select still
   answers a choice. Aplite keeps the simpler one-line question list.
 - Otherwise the detail screen shows the latest reply text, with scrolling for longer replies. When
   the reply is displayed, the app marks it read on the watch.

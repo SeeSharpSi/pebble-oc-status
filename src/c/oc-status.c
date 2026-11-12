@@ -633,6 +633,7 @@ static void question_marquee_start(void) {
 
 static void show_reply_text(const char *text) {
   if (!s_detail_text || !s_detail_scroll) return;
+  layer_set_hidden(text_layer_get_layer(s_detail_text), false);
   if (s_detail_window) {
     Layer *root = window_get_root_layer(s_detail_window);
     GRect bounds = layer_get_bounds(root);
@@ -1051,11 +1052,7 @@ static void layout_answer_detail(bool reset_offset) {
   int width = bounds.size.w - pad * 2;
   int y = 4;
 
-  const char *question = question_row_text();
-  text_layer_set_text(s_detail_text, question);
-  GSize q = text_size(question, fonts_get_system_font(FONT_KEY_GOTHIC_18), width, true);
-  layer_set_frame(text_layer_get_layer(s_detail_text), GRect(pad, y, width, q.h + 2));
-  y += q.h + 10;
+  layer_set_hidden(text_layer_get_layer(s_detail_text), true);
 
   const char *label = s_choice_full_label[0] ? s_choice_full_label :
                       s_choices[s_answer_detail_choice].label;
@@ -1109,9 +1106,9 @@ static void detail_show_answer_text_mode(int index) {
   s_choice_description_loading = true;
   set_detail_header(s_detail_name[0] ? s_detail_name : "Session", "");
   layer_set_hidden(text_layer_get_layer(s_detail_header), false);
-  layer_set_hidden(text_layer_get_layer(s_question_prompt), false);
+  layer_set_hidden(text_layer_get_layer(s_question_prompt), true);
   layer_set_hidden(menu_layer_get_layer(s_choice_menu), true);
-  detail_scroll_frame(true);
+  detail_scroll_frame(false);
   layer_set_hidden(scroll_layer_get_layer(s_detail_scroll), false);
   scroll_layer_set_click_config_onto_window(s_detail_scroll, s_detail_window);
   layout_answer_detail(true);
