@@ -78,6 +78,7 @@ static char s_status_text[48] = "Connecting...";
 static bool s_has_spinner;
 static int s_spin_frame;
 static AppTimer *s_spin_timer;
+static AppTimer *s_connect_timer;
 static GFont s_braille_font;
 
 static Window *s_detail_window;
@@ -1609,6 +1610,10 @@ static void handle_list_end(DictionaryIterator *iter) {
   if (s_session_count > MAX_SESSIONS) s_session_count = MAX_SESSIONS;
   s_list_loading = false;
   s_have_list = true;
+  if (s_connect_timer) {
+    app_timer_cancel(s_connect_timer);
+    s_connect_timer = NULL;
+  }
 
   const char *status = tuple_string(iter, MESSAGE_KEY_status_text, NULL);
   if (status) {
@@ -1914,11 +1919,14 @@ static void inbox_dropped(AppMessageResult reason, void *context) {
 }
 
 static void send_hello(void *data) {
+  s_connect_timer = NULL;
+  if (s_have_list) return;
   DictionaryIterator *out;
   if (app_message_outbox_begin(&out) == APP_MSG_OK) {
     dict_write_uint8(out, MESSAGE_KEY_req, 1);
     app_message_outbox_send();
   }
+  s_connect_timer = app_timer_register(3000, send_hello, NULL);
 }
 
 // ---------------------------------------------------------------- app lifecycle
@@ -1959,12 +1967,12 @@ static void init(void) {
   });
 
   window_stack_push(s_list_window, false);
-  app_timer_register(400, send_hello, NULL);
-  app_timer_register(2600, send_hello, NULL);
+  app_timer_register(300, send_hello, NULL);
 }
 
 static void deinit(void) {
   if (s_spin_timer) app_timer_cancel(s_spin_timer);
+  if (s_connect_timer) app_timer_cancel(s_connect_timer);
   if (s_result_timer) app_timer_cancel(s_result_timer);
 #ifndef PBL_PLATFORM_APLITE
   question_marquee_stop();
