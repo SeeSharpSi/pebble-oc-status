@@ -184,6 +184,70 @@ function shortErrorText(error) {
   return text;
 }
 
+// PebbleKit JS apps can only subscribe to plugin sources; they cannot read one directly.
+// A short-lived subscription is the read: take the first snapshot, then unsubscribe.
+function readSourceOnce(category, item) {
+  if (typeof Pebble.readSource === 'function') {
+    return Pebble.readSource({
+      plugin: OPENCODE_UUID,
+      category: category,
+      item: item,
+      maxStalenessMs: 0
+    });
+  }
+  return new Promise(function (resolve, reject) {
+    var subscription = null;
+    var timer = null;
+    var settled = false;
+    function finish(error, envelope) {
+      if (settled) return;
+      settled = true;
+      if (timer) {
+        clearTimeout(timer);
+        timer = null;
+      }
+      if (subscription) {
+        try {
+          subscription.unsubscribe();
+        } catch (e) {
+          log('one-shot unsubscribe failed: ' + e);
+        }
+        subscription = null;
+      }
+      if (error) reject(error);
+      else resolve(envelope);
+    }
+    timer = setTimeout(function () {
+      finish({ code: 'TIMEOUT', message: 'Source timed out' });
+    }, 12000);
+    try {
+      var created = Pebble.subscribeToSource({
+        plugin: OPENCODE_UUID,
+        category: category,
+        item: item,
+        maxStalenessMs: 0,
+        onData: function (envelope) {
+          finish(null, envelope);
+        },
+        onError: function (error) {
+          finish(error || { code: 'PLUGIN_UNAVAILABLE' });
+        }
+      });
+      if (settled) {
+        try {
+          created.unsubscribe();
+        } catch (e2) {
+          log('one-shot cleanup failed: ' + e2);
+        }
+      } else {
+        subscription = created;
+      }
+    } catch (e) {
+      finish(e);
+    }
+  });
+}
+
 // ---------------------------------------------------------------- outgoing messages
 
 function isListMessage(dict) {
@@ -671,15 +735,7 @@ function onPermissions(envelope) {
 }
 
 function refreshPermissionsForDetail(sessionId, callback) {
-  if (typeof Pebble.readSource !== 'function') {
-    callback(null);
-    return;
-  }
-  Pebble.readSource({
-    plugin: OPENCODE_UUID,
-    category: 'opencode',
-    item: 'permission'
-  }).then(function (envelope) {
+  readSourceOnce('opencode', 'permission').then(function (envelope) {
     onPermissions(envelope);
     callback(null);
   }).catch(function (error) {
@@ -826,8 +882,8 @@ function noReplyMessage(sessionId) {
   return 'This session is not in the plugin\'s recent replies. Increase Recent replies in the OpenCode plugin settings, or set this session as the default.';
 }
 
-function sendMessageDetail(sessionId, title, status, text) {
-  state.detailKind = 'message';
+function sendMessageDetail(sessionId, title, status, text, kind) {
+  state.detailKind = kind || 'message';
   enqueue({
     detail_kind: 3,
     session_id: sessionId,
@@ -872,12 +928,7 @@ function waitingText(sessionId) {
 }
 
 function refreshFocusedReply(sessionId, sendFallback) {
-  if (typeof Pebble.readSource !== 'function') return;
-  Pebble.readSource({
-    plugin: OPENCODE_UUID,
-    category: 'opencode',
-    item: 'reply'
-  }).then(function (envelope) {
+  readSourceOnce('opencode', 'reply').then(function (envelope) {
     applyReply(envelope, true);
     if (state.detailSession !== sessionId || state.detailKind === 'question') return;
     var entry = replyEntryFor(sessionId);
@@ -885,12 +936,13 @@ function refreshFocusedReply(sessionId, sendFallback) {
       sendReplyDetail(sessionId);
     } else if (sendFallback) {
       sendMessageDetail(sessionId, nameFor(sessionId),
-        entry && entry.status ? entry.status : 'No reply', noReplyMessage(sessionId));
+        entry && entry.status ? entry.status : 'No reply', noReplyMessage(sessionId), 'reply');
     }
   }).catch(function (error) {
     state.errors.reply = errorCode(error);
     if (sendFallback && state.detailSession === sessionId && state.detailKind !== 'question') {
-      sendMessageDetail(sessionId, nameFor(sessionId), 'Reply unavailable', shortErrorText(error));
+      sendMessageDetail(sessionId, nameFor(sessionId), 'Reply unavailable',
+        shortErrorText(error), 'reply');
     }
   });
 }
@@ -915,21 +967,15 @@ function refreshReplyForDetail(sessionId) {
     return;
   }
 
-  if (typeof Pebble.readSource !== 'function') {
-    sendMessageDetail(sessionId, nameFor(sessionId), 'No reply', noReplyMessage(sessionId));
-    return;
-  }
+  sendMessageDetail(sessionId, nameFor(sessionId), 'Loading', 'Fetching the latest reply...',
+    'reply');
 
-  Pebble.readSource({
-    plugin: OPENCODE_UUID,
-    category: 'opencode',
-    item: 'replies'
-  }).then(function (envelope) {
+  readSourceOnce('opencode', 'replies').then(function (envelope) {
     onReplies(envelope);
-    if (state.detailSession !== sessionId || state.detailKind === 'question') return;
+    if (state.detailSession !== sessionId || state.detailKind !== 'reply') return;
     var fresh = replyEntryFor(sessionId);
     if (fresh && fresh.hasText) {
-      sendReplyDetail(sessionId);
+      maybeUpdateOpenReply(fresh);
       if (fresh.isDefault || (state.reply && state.reply.sessionId === sessionId)) {
         refreshFocusedReply(sessionId, false);
       }
@@ -938,15 +984,16 @@ function refreshReplyForDetail(sessionId) {
       refreshFocusedReply(sessionId, true);
     } else if (fresh) {
       sendMessageDetail(sessionId, nameFor(sessionId), fresh.status || 'No reply',
-        noReplyMessage(sessionId));
+        noReplyMessage(sessionId), 'reply');
     } else {
-      sendMessageDetail(sessionId, nameFor(sessionId), 'No reply', noReplyMessage(sessionId));
+      sendMessageDetail(sessionId, nameFor(sessionId), 'No reply',
+        noReplyMessage(sessionId), 'reply');
     }
   }).catch(function (error) {
     state.errors.replies = errorCode(error);
-    if (state.detailSession === sessionId && state.detailKind !== 'question') {
+    if (state.detailSession === sessionId && state.detailKind === 'reply') {
       sendMessageDetail(sessionId, nameFor(sessionId), 'Replies unavailable',
-        shortErrorText(error));
+        shortErrorText(error), 'reply');
     }
   });
 }
@@ -1432,19 +1479,14 @@ function continueQuestionOrReply(sessionId) {
   var active = activeFor(sessionId);
   var questionLikely = (status && (status.questionCount > 0 || status.reason === 'Question')) ||
                        (active && active.status.indexOf('input') !== -1);
-  var needsQuestionCheck = questionLikely && typeof Pebble.readSource === 'function';
-  if (!needsQuestionCheck) {
+  if (!questionLikely) {
     refreshReplyForDetail(sessionId);
     return;
   }
 
   // Chat status or the active map can say "Waiting for input" before the question source
   // has polled. Read that source once before falling back to the reply view.
-  Pebble.readSource({
-    plugin: OPENCODE_UUID,
-    category: 'opencode',
-    item: 'question'
-  }).then(function (envelope) {
+  readSourceOnce('opencode', 'question').then(function (envelope) {
     onQuestions(envelope);
     if (state.detailSession === sessionId && !state.flow && !startQuestion(sessionId)) {
       refreshReplyForDetail(sessionId);
@@ -1473,7 +1515,7 @@ function handleDetailRequest(sessionId) {
     (active && active.status.indexOf('approval') !== -1)
   );
 
-  if (permissionLikely && typeof Pebble.readSource === 'function') {
+  if (permissionLikely) {
     refreshPermissionsForDetail(sessionId, function (error) {
       if (state.detailSession !== sessionId) return;
       if (error) {
@@ -1514,12 +1556,7 @@ function stopPolling() {
 }
 
 function pollRead(category, item, key, handler) {
-  if (typeof Pebble.readSource !== 'function') return Promise.resolve();
-  return Pebble.readSource({
-    plugin: OPENCODE_UUID,
-    category: category,
-    item: item
-  }).then(function (envelope) {
+  return readSourceOnce(category, item).then(function (envelope) {
     state.errors[key] = null;
     handler(envelope);
   }).catch(function (error) {

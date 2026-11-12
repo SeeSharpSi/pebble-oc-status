@@ -395,7 +395,34 @@ test('replies source supplies latest replies for non-default sessions', async ()
     messages.filter((message) => message.reply_chunk).map((message) => message.reply_chunk).join(''),
     'First session reply'
   );
-  assert.equal(messages.some((message) => message.detail_kind === 3), false);
+  assert.equal(
+    messages.some((message) => message.detail_kind === 3 && message.detail_status !== 'Loading'),
+    false
+  );
+});
+
+test('an uncached detail reads replies with a one-shot subscription', async () => {
+  const h = harness();
+  delete h.Pebble.readSource;
+
+  h.watch({ detail_req: 1, session_id: 'ses_a' });
+  const loading = h.takeSent();
+  assert.ok(loading.some((message) => message.detail_kind === 3 && message.detail_status === 'Loading'));
+  assert.equal(loading.some((message) => /not in the plugin/.test(message.detail_text || '')), false);
+
+  const oneShot = h.subscriptions.filter((entry) => entry.item === 'replies').pop();
+  assert.ok(oneShot);
+  oneShot.onData({
+    instances: [replyRow('ses_a', 'Krtni Project', 'msg_a', 'Reply from one-shot read')]
+  });
+  await new Promise((resolve) => setImmediate(resolve));
+
+  const messages = h.takeSent();
+  assert.equal(
+    messages.filter((message) => message.reply_chunk).map((message) => message.reply_chunk).join(''),
+    'Reply from one-shot read'
+  );
+  assert.equal(h.subscriptions.filter((entry) => entry.item === 'replies').length, 1);
 });
 
 test('running sessions show the spinner instead of an unread dot', () => {
