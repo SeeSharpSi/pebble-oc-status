@@ -25,6 +25,7 @@ var KEY_UNVIEWED = 'ocstatus.unviewed.v1';
 var KEY_VIEWED_REPLY = 'ocstatus.viewedReply.v1';
 var KEY_KNOWN = 'ocstatus.known.v1';
 var KEY_SETTINGS = 'ocstatus.settings.v1';
+var CONFIG_URL = 'https://seesharpssi.github.io/pebble-oc-status/config.html';
 
 var SAVED_SETTINGS = readObject(KEY_SETTINGS, {});
 var SAVED_POLL_RATE = Number(SAVED_SETTINGS.poll_rate);
@@ -1494,18 +1495,18 @@ function applyPollingMode() {
   rebuild(true);
 }
 
-function applyWatchSettings(payload) {
-  if (!payload || (payload.poll_rate === undefined && payload.only_action === undefined)) return;
+function applySettings(options) {
+  if (!options || (options.poll_rate === undefined && options.only_action === undefined)) return;
   var rateChanged = false;
   var filterChanged = false;
-  if (payload.poll_rate !== undefined) {
-    var rate = Number(payload.poll_rate);
+  if (options.poll_rate !== undefined) {
+    var rate = Number(options.poll_rate);
     if ([0, 10, 30, 60].indexOf(rate) === -1) rate = 0;
     rateChanged = rate !== state.pollRateSec;
     state.pollRateSec = rate;
   }
-  if (payload.only_action !== undefined) {
-    var only = !!payload.only_action;
+  if (options.only_action !== undefined) {
+    var only = !!options.only_action;
     filterChanged = only !== state.onlyAction;
     state.onlyAction = only;
   }
@@ -1650,7 +1651,6 @@ function finishPromptUpload() {
 
 function handleWatchMessage(payload) {
   if (!payload) return;
-  applyWatchSettings(payload);
   if (payload.req) {
     ensurePlugin();
     sendList(true);
@@ -1703,6 +1703,29 @@ function handleWatchMessage(payload) {
 
 Pebble.addEventListener('appmessage', function (event) {
   handleWatchMessage(event && event.payload);
+});
+
+Pebble.addEventListener('showConfiguration', function () {
+  var url = CONFIG_URL +
+    '?poll_rate=' + encodeURIComponent(state.pollRateSec) +
+    '&only_action=' + (state.onlyAction ? '1' : '0');
+  Pebble.openURL(url);
+});
+
+Pebble.addEventListener('webviewclosed', function (event) {
+  if (!event || !event.response) return;
+  var options = null;
+  try {
+    options = JSON.parse(decodeURIComponent(event.response));
+  } catch (e) {
+    try {
+      options = JSON.parse(event.response);
+    } catch (e2) {
+      log('invalid settings response');
+      return;
+    }
+  }
+  applySettings(options);
 });
 
 Pebble.addEventListener('ready', function () {

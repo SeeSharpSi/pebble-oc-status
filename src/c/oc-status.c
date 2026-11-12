@@ -25,10 +25,6 @@
 #define SPINNER_NUDGE 3
 #define FOOTER_HEIGHT 18
 #define DETAIL_BODY_Y HEADER_HEIGHT
-#define SETTINGS_KEY_POLL_RATE 1
-#define SETTINGS_KEY_ONLY_ACTION 2
-#define SETTINGS_HEADER_HEIGHT 30
-#define SETTINGS_ROW_HEIGHT 46
 #ifdef PBL_PLATFORM_APLITE
 #define REPLIES_BUFFER_SIZE 1856
 #define QUESTION_DESCRIPTION_LEN 384
@@ -84,14 +80,6 @@ static int s_spin_frame;
 static AppTimer *s_spin_timer;
 static AppTimer *s_connect_timer;
 static GFont s_braille_font;
-static uint8_t s_poll_rate;
-static bool s_only_action;
-
-#ifndef PBL_PLATFORM_APLITE
-static Window *s_settings_window;
-static TextLayer *s_settings_header;
-static MenuLayer *s_settings_menu;
-#endif
 
 static Window *s_detail_window;
 static Layer *s_header_bg;
@@ -317,11 +305,7 @@ static uint16_t list_get_num_sections(MenuLayer *menu_layer, void *data) {
 }
 
 static uint16_t list_get_num_rows(MenuLayer *menu_layer, uint16_t section_index, void *data) {
-#ifdef PBL_PLATFORM_APLITE
   return s_session_count > 0 ? (uint16_t)s_session_count : 1;
-#else
-  return s_session_count == 0 ? 2 : (uint16_t)(s_session_count + 1);
-#endif
 }
 
 static int16_t list_get_cell_height(MenuLayer *menu_layer, MenuIndex *cell_index, void *data) {
@@ -333,9 +317,10 @@ static void list_draw_empty(GContext *ctx, const Layer *cell_layer) {
   graphics_context_set_fill_color(ctx, GColorWhite);
   graphics_fill_rect(ctx, bounds, 0, GCornerNone);
   graphics_context_set_text_color(ctx, GColorBlack);
-  const char *title = s_list_loading ? "Connecting..." : (s_only_action ? "No action" : "No sessions");
+  bool no_action = !s_list_loading && strcmp(s_status_text, "No action") == 0;
+  const char *title = s_list_loading ? "Connecting..." : (no_action ? "No action" : "No sessions");
   const char *subtitle = s_list_loading ? "Waiting for phone" :
-                         (s_only_action ? "All caught up" : "Start a session");
+                         (no_action ? "All caught up" : "Start a session");
   graphics_draw_text(ctx, title,
                      fonts_get_system_font(FONT_KEY_GOTHIC_18_BOLD),
                      GRect(8, 3, bounds.size.w - 16, 22),
@@ -347,50 +332,13 @@ static void list_draw_empty(GContext *ctx, const Layer *cell_layer) {
                      GTextOverflowModeTrailingEllipsis, GTextAlignmentCenter, NULL);
 }
 
-#ifndef PBL_PLATFORM_APLITE
-static void list_draw_settings_row(GContext *ctx, const Layer *cell_layer) {
-  GRect bounds = layer_get_bounds(cell_layer);
-  bool highlighted = menu_cell_layer_is_highlighted(cell_layer);
-  GColor fg = highlighted ? list_highlight_text() : GColorBlack;
-  graphics_context_set_fill_color(ctx, highlighted ? list_highlight() : GColorWhite);
-  graphics_fill_rect(ctx, bounds, 0, GCornerNone);
-  int x = PBL_IF_ROUND_ELSE(32, 6);
-  graphics_context_set_text_color(ctx, fg);
-  graphics_draw_text(ctx, "Settings",
-                     fonts_get_system_font(FONT_KEY_GOTHIC_18_BOLD),
-                     GRect(x, 3, bounds.size.w - x - 8, 22),
-                     GTextOverflowModeTrailingEllipsis, GTextAlignmentLeft, NULL);
-  graphics_context_set_text_color(ctx, highlighted ? GColorLightGray : muted_text());
-  graphics_draw_text(ctx, "Polling and filter",
-                     fonts_get_system_font(FONT_KEY_GOTHIC_14),
-                     GRect(x, 22, bounds.size.w - x - 8, 16),
-                     GTextOverflowModeTrailingEllipsis, GTextAlignmentLeft, NULL);
-  if (!highlighted) {
-    graphics_context_set_stroke_color(ctx, line_color());
-    graphics_draw_line(ctx, GPoint(0, bounds.size.h - 1),
-                       GPoint(bounds.size.w, bounds.size.h - 1));
-  }
-}
-#endif
-
 static void list_draw_row(GContext *ctx, const Layer *cell_layer, MenuIndex *cell_index, void *data) {
   GRect bounds = layer_get_bounds(cell_layer);
   if (s_session_count == 0) {
-    if (cell_index->row == 0) {
-      list_draw_empty(ctx, cell_layer);
-      return;
-    }
-#ifndef PBL_PLATFORM_APLITE
-    list_draw_settings_row(ctx, cell_layer);
-#endif
+    list_draw_empty(ctx, cell_layer);
     return;
   }
-  if (cell_index->row >= (uint16_t)s_session_count) {
-#ifndef PBL_PLATFORM_APLITE
-    list_draw_settings_row(ctx, cell_layer);
-#endif
-    return;
-  }
+  if (cell_index->row >= (uint16_t)s_session_count) return;
 
   Session *session = &s_sessions[cell_index->row];
   bool highlighted = menu_cell_layer_is_highlighted(cell_layer);
@@ -441,21 +389,13 @@ static void list_draw_row(GContext *ctx, const Layer *cell_layer, MenuIndex *cel
 }
 
 static void request_detail(const char *session_id, const char *name, uint8_t flags);
-#ifndef PBL_PLATFORM_APLITE
-static void settings_window_push(void);
-#endif
-
-static void send_settings_message(void) {
-  DictionaryIterator *out;
-  if (app_message_outbox_begin(&out) != APP_MSG_OK) return;
-  dict_write_uint8(out, MESSAGE_KEY_req, 1);
-  dict_write_uint8(out, MESSAGE_KEY_poll_rate, s_poll_rate);
-  dict_write_uint8(out, MESSAGE_KEY_only_action, s_only_action ? 1 : 0);
-  app_message_outbox_send();
-}
 
 static void request_list_refresh(void) {
-  send_settings_message();
+  DictionaryIterator *out;
+  if (app_message_outbox_begin(&out) == APP_MSG_OK) {
+    dict_write_uint8(out, MESSAGE_KEY_req, 1);
+    app_message_outbox_send();
+  }
 }
 
 static void request_clear_completed(const char *session_id) {
@@ -468,23 +408,12 @@ static void request_clear_completed(const char *session_id) {
 
 static void list_select(MenuLayer *menu_layer, MenuIndex *cell_index, void *data) {
   if (s_session_count == 0) {
-#ifndef PBL_PLATFORM_APLITE
-    if (cell_index->row == 1) {
-      settings_window_push();
-      return;
-    }
-#endif
     request_list_refresh();
     return;
   }
-  if (cell_index->row < (uint16_t)s_session_count) {
-    Session *session = &s_sessions[cell_index->row];
-    request_detail(session->id, session->name, session->flags);
-#ifndef PBL_PLATFORM_APLITE
-  } else {
-    settings_window_push();
-#endif
-  }
+  if (cell_index->row >= (uint16_t)s_session_count) return;
+  Session *session = &s_sessions[cell_index->row];
+  request_detail(session->id, session->name, session->flags);
 }
 
 static void list_select_long(MenuLayer *menu_layer, MenuIndex *cell_index, void *data) {
@@ -550,114 +479,6 @@ static void list_window_unload(Window *window) {
   layer_destroy(s_footer_layer);
   s_footer_layer = NULL;
 }
-
-// ---------------------------------------------------------------- settings
-
-#ifndef PBL_PLATFORM_APLITE
-static const char *poll_rate_label(void) {
-  switch (s_poll_rate) {
-    case 10: return "Every 10 seconds";
-    case 30: return "Every 30 seconds";
-    case 60: return "Every 60 seconds";
-    default: return "Plugin default";
-  }
-}
-
-static uint16_t settings_get_num_sections(MenuLayer *menu_layer, void *data) {
-  return 1;
-}
-
-static uint16_t settings_get_num_rows(MenuLayer *menu_layer, uint16_t section_index, void *data) {
-  return 2;
-}
-
-static int16_t settings_get_cell_height(MenuLayer *menu_layer, MenuIndex *cell_index, void *data) {
-  return SETTINGS_ROW_HEIGHT;
-}
-
-static void settings_draw_row(GContext *ctx, const Layer *cell_layer, MenuIndex *cell_index, void *data) {
-  GRect bounds = layer_get_bounds(cell_layer);
-  bool highlighted = menu_cell_layer_is_highlighted(cell_layer);
-  graphics_context_set_fill_color(ctx, highlighted ? list_highlight() : GColorWhite);
-  graphics_fill_rect(ctx, bounds, 0, GCornerNone);
-  int x = PBL_IF_ROUND_ELSE(34, 10);
-  const char *title = cell_index->row == 0 ? "Plugin polling" : "Only active/action";
-  const char *value = cell_index->row == 0 ? poll_rate_label() : (s_only_action ? "On" : "Off");
-  graphics_context_set_text_color(ctx, highlighted ? list_highlight_text() : GColorBlack);
-  graphics_draw_text(ctx, title,
-                     fonts_get_system_font(FONT_KEY_GOTHIC_18_BOLD),
-                     GRect(x, 4, bounds.size.w - x - 10, 22),
-                     GTextOverflowModeTrailingEllipsis, GTextAlignmentLeft, NULL);
-  graphics_context_set_text_color(ctx, highlighted ? GColorLightGray : muted_text());
-  graphics_draw_text(ctx, value,
-                     fonts_get_system_font(FONT_KEY_GOTHIC_14),
-                     GRect(x, 25, bounds.size.w - x - 10, 18),
-                     GTextOverflowModeTrailingEllipsis, GTextAlignmentLeft, NULL);
-  if (!highlighted) {
-    graphics_context_set_stroke_color(ctx, line_color());
-    graphics_draw_line(ctx, GPoint(0, bounds.size.h - 1),
-                       GPoint(bounds.size.w, bounds.size.h - 1));
-  }
-}
-
-static void settings_select(MenuLayer *menu_layer, MenuIndex *cell_index, void *data) {
-  if (cell_index->row == 0) {
-    static const uint8_t rates[] = {0, 10, 30, 60};
-    int index = 0;
-    for (int i = 0; i < (int)ARRAY_LENGTH(rates); i++) {
-      if (rates[i] == s_poll_rate) {
-        index = i;
-        break;
-      }
-    }
-    s_poll_rate = rates[(index + 1) % (int)ARRAY_LENGTH(rates)];
-    persist_write_int(SETTINGS_KEY_POLL_RATE, (int32_t)s_poll_rate);
-  } else {
-    s_only_action = !s_only_action;
-    persist_write_bool(SETTINGS_KEY_ONLY_ACTION, s_only_action);
-  }
-  send_settings_message();
-  if (s_settings_menu) menu_layer_reload_data(s_settings_menu);
-}
-
-static void settings_window_load(Window *window) {
-  Layer *root = window_get_root_layer(window);
-  GRect bounds = layer_get_bounds(root);
-  s_settings_header = text_layer_create(GRect(0, 0, bounds.size.w, SETTINGS_HEADER_HEIGHT));
-  text_layer_set_background_color(s_settings_header, PBL_IF_COLOR_ELSE(GColorLightGray, GColorWhite));
-  text_layer_set_text_color(s_settings_header, GColorBlack);
-  text_layer_set_font(s_settings_header, fonts_get_system_font(FONT_KEY_GOTHIC_18_BOLD));
-  text_layer_set_text_alignment(s_settings_header, GTextAlignmentCenter);
-  text_layer_set_text(s_settings_header, "Settings");
-  layer_add_child(root, text_layer_get_layer(s_settings_header));
-
-  s_settings_menu = menu_layer_create(GRect(0, SETTINGS_HEADER_HEIGHT, bounds.size.w,
-                                             bounds.size.h - SETTINGS_HEADER_HEIGHT));
-  menu_layer_set_callbacks(s_settings_menu, NULL, (MenuLayerCallbacks){
-    .get_num_sections = settings_get_num_sections,
-    .get_num_rows = settings_get_num_rows,
-    .get_cell_height = settings_get_cell_height,
-    .draw_row = settings_draw_row,
-    .select_click = settings_select,
-  });
-  menu_layer_set_normal_colors(s_settings_menu, GColorWhite, GColorBlack);
-  menu_layer_set_highlight_colors(s_settings_menu, list_highlight(), list_highlight_text());
-  menu_layer_set_click_config_onto_window(s_settings_menu, window);
-  layer_add_child(root, menu_layer_get_layer(s_settings_menu));
-}
-
-static void settings_window_unload(Window *window) {
-  menu_layer_destroy(s_settings_menu);
-  s_settings_menu = NULL;
-  text_layer_destroy(s_settings_header);
-  s_settings_header = NULL;
-}
-
-static void settings_window_push(void) {
-  if (window_stack_get_top_window() == s_settings_window) return;
-  window_stack_push(s_settings_window, true);
-}
-#endif
 
 // ---------------------------------------------------------------- detail header
 
@@ -2101,7 +1922,11 @@ static void inbox_dropped(AppMessageResult reason, void *context) {
 static void send_hello(void *data) {
   s_connect_timer = NULL;
   if (s_have_list) return;
-  send_settings_message();
+  DictionaryIterator *out;
+  if (app_message_outbox_begin(&out) == APP_MSG_OK) {
+    dict_write_uint8(out, MESSAGE_KEY_req, 1);
+    app_message_outbox_send();
+  }
   s_connect_timer = app_timer_register(3000, send_hello, NULL);
 }
 
@@ -2109,17 +1934,6 @@ static void send_hello(void *data) {
 
 static void init(void) {
   s_braille_font = fonts_load_custom_font(resource_get_handle(RESOURCE_ID_BRAILLE_FONT_20));
-  s_poll_rate = 0;
-  s_only_action = false;
-#ifndef PBL_PLATFORM_APLITE
-  if (persist_exists(SETTINGS_KEY_POLL_RATE)) {
-    int rate = persist_read_int(SETTINGS_KEY_POLL_RATE);
-    if (rate == 10 || rate == 30 || rate == 60) s_poll_rate = (uint8_t)rate;
-  }
-  if (persist_exists(SETTINGS_KEY_ONLY_ACTION)) {
-    s_only_action = persist_read_bool(SETTINGS_KEY_ONLY_ACTION);
-  }
-#endif
 #ifndef PBL_PLATFORM_APLITE
   s_dictation = dictation_session_create(PROMPT_TEXT_MAX, dictation_callback, NULL);
   if (s_dictation) {
@@ -2153,15 +1967,6 @@ static void init(void) {
     .unload = detail_window_unload,
   });
 
-#ifndef PBL_PLATFORM_APLITE
-  s_settings_window = window_create();
-  window_set_background_color(s_settings_window, GColorWhite);
-  window_set_window_handlers(s_settings_window, (WindowHandlers){
-    .load = settings_window_load,
-    .unload = settings_window_unload,
-  });
-#endif
-
   window_stack_push(s_list_window, false);
   app_timer_register(300, send_hello, NULL);
 }
@@ -2177,9 +1982,6 @@ static void deinit(void) {
   if (s_dictation) dictation_session_destroy(s_dictation);
 #endif
   if (s_braille_font) fonts_unload_custom_font(s_braille_font);
-#ifndef PBL_PLATFORM_APLITE
-  window_destroy(s_settings_window);
-#endif
   window_destroy(s_detail_window);
   window_destroy(s_list_window);
 }

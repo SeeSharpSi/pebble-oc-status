@@ -1,7 +1,7 @@
 {
   "name": "oc-status",
   "author": "OpenCode for Pebble contributors",
-  "version": "1.5.0",
+  "version": "1.5.1",
   "keywords": [
     "pebble-app"
   ],
@@ -28,6 +28,9 @@
     "watchapp": {
       "watchface": false
     },
+    "capabilities": [
+      "configurable"
+    ],
     "usesPermissions": [
       {
         "name": "InvokeAction",
@@ -87,8 +90,6 @@
       "clear_completed",
       "clear_ok",
       "clear_text",
-      "poll_rate",
-      "only_action",
       "permission_request_id",
       "permission_decision",
       "permission_choice"

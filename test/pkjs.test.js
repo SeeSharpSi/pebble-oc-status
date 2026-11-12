@@ -14,6 +14,7 @@ function harness(options = {}) {
   const sent = [];
   const storage = new Map();
   const actions = [];
+  const opened = [];
   const sourceEnvelopes = new Map();
   const timers = new Map();
   let nextTimer = 0;
@@ -47,6 +48,9 @@ function harness(options = {}) {
     invokeAction(request) {
       actions.push(request);
       return Promise.resolve({ ok: true, text: 'Answer sent.' });
+    },
+    openURL(url) {
+      opened.push(url);
     },
     sendAppMessage(message, success) {
       sent.push(message);
@@ -123,7 +127,7 @@ function harness(options = {}) {
   }
 
   return {
-    Pebble, handlers, subscriptions, actions, fire, watch, takeSent, sessionMessages, runTimers,
+    Pebble, handlers, subscriptions, actions, opened, fire, watch, takeSent, sessionMessages, runTimers,
     setReply(envelope) { replyEnvelope = envelope; },
     setReplies(envelope) { repliesEnvelope = envelope; },
     setPermission(envelope) { permissionEnvelope = envelope; },
@@ -581,6 +585,16 @@ test('question text and answer descriptions are sent to the watch', () => {
   assert.equal(detail.choice_description, 'Commit the tagline change and deploy it with the new theme.');
 });
 
+test('showConfiguration opens the hosted settings page', () => {
+  const h = harness();
+  h.handlers.showConfiguration();
+  assert.equal(h.opened.length, 1);
+  assert.equal(
+    h.opened[0],
+    'https://seesharpssi.github.io/pebble-oc-status/config.html?poll_rate=0&only_action=0'
+  );
+});
+
 test('only-action filter hides read sessions and persists', () => {
   const h = harness();
   h.fire('agent', 'chats', {
@@ -594,14 +608,14 @@ test('only-action filter hides read sessions and persists', () => {
   });
   h.takeSent();
 
-  h.watch({ poll_rate: 0, only_action: 1 });
+  h.handlers.webviewclosed({ response: encodeURIComponent(JSON.stringify({ poll_rate: 0, only_action: 1 })) });
   let sessions = h.sessionMessages(h.takeSent());
   assert.deepEqual(sessions.map((entry) => entry.id), ['ses_a', 'ses_b']);
   let settings = JSON.parse(h.storage.get('ocstatus.settings.v1'));
   assert.equal(settings.only_action, 1);
   assert.equal(settings.poll_rate, 0);
 
-  h.watch({ poll_rate: 0, only_action: 0 });
+  h.handlers.webviewclosed({ response: encodeURIComponent(JSON.stringify({ poll_rate: 0, only_action: 0 })) });
   sessions = h.sessionMessages(h.takeSent());
   assert.deepEqual(sessions.map((entry) => entry.id), ['ses_a', 'ses_b', 'ses_c']);
   settings = JSON.parse(h.storage.get('ocstatus.settings.v1'));
@@ -620,14 +634,14 @@ test('custom poll rate stops subscriptions and reads sources on its own', async 
   h.takeSent();
   assert.ok(h.subscriptions.length > 0);
 
-  h.watch({ poll_rate: 10, only_action: 0 });
+  h.handlers.webviewclosed({ response: encodeURIComponent(JSON.stringify({ poll_rate: 10, only_action: 0 })) });
   await new Promise((resolve) => setImmediate(resolve));
   assert.equal(h.subscriptions.length, 0, 'subscriptions stopped');
   const sessions = h.sessionMessages(h.takeSent());
   assert.equal(sessions.length, 1);
   assert.equal(sessions[0].id, 'ses_a');
 
-  h.watch({ poll_rate: 0, only_action: 0 });
+  h.handlers.webviewclosed({ response: encodeURIComponent(JSON.stringify({ poll_rate: 0, only_action: 0 })) });
   assert.ok(h.subscriptions.length > 0, 'subscriptions restored');
 });
 

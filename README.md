@@ -32,7 +32,7 @@ flat session list and one detail at a time over AppMessage.
 
 ## Settings
 
-The last row in the session list opens **Settings** on colour watches.
+Open **OpenCode Status** in the Pebble app and use its settings page (the gear icon).
 
 - **Plugin polling**: **Plugin default** keeps the plugin's own suggested refresh intervals.
   Choosing 10, 30, or 60 seconds makes the app poll the chat list, active sessions, chat status, and
@@ -40,7 +40,8 @@ The last row in the session list opens **Settings** on colour watches.
 - **Only active/action**: hides sessions that are neither running nor asking for attention. Unread
   replies, permission requests, and questions remain visible. An empty list shows **No action**.
 
-Settings are stored on the watch. Aplite keeps plugin defaults and has no Settings row.
+Settings are stored by the phone-side app and applied the next time the watch app refreshes. The
+settings page is also available for Aplite.
 
 ## Chat status, unread, and replies
 
