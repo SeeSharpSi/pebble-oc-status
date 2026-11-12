@@ -39,6 +39,9 @@ Open **OpenCode Status** in the Pebble app and use its settings page (the gear i
   questions on its own timer and stop its plugin subscriptions. Reply text is still read on demand.
 - **Only active/action**: hides sessions that are neither running nor asking for attention. Unread
   replies, permission requests, and questions remain visible. An empty list shows **No action**.
+- **Mark read after**: default **Never**. On app load, unread replies older than the chosen interval
+  (5/15/30 minutes, 1/2 hours, or 1 day) are marked read automatically. Questions and permission
+  requests are never dismissed. This runs only during the app-load check, not as a background task.
 
 Settings are stored by the phone-side app and applied the next time the watch app refreshes. The
 settings page is embedded in the phone-side app and opened from the Pebble app; it does not use a

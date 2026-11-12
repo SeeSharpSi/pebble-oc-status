@@ -200,6 +200,56 @@
       </div>
     </section>
 
+    <section aria-labelledby="markread-title">
+      <h2 id="markread-title">Mark read after</h2>
+      <p class="hint">On app load, unread replies older than this are marked read automatically. Permission and question requests are never dismissed.</p>
+      <div class="choices">
+        <label class="choice">
+          <input type="radio" name="mark_read_after" value="0">
+          <span>
+            <strong>Never</strong>
+            <small>Leave unread dots alone until you clear them.</small>
+          </span>
+        </label>
+        <label class="choice">
+          <input type="radio" name="mark_read_after" value="300">
+          <span>
+            <strong>5 minutes</strong>
+          </span>
+        </label>
+        <label class="choice">
+          <input type="radio" name="mark_read_after" value="900">
+          <span>
+            <strong>15 minutes</strong>
+          </span>
+        </label>
+        <label class="choice">
+          <input type="radio" name="mark_read_after" value="1800">
+          <span>
+            <strong>30 minutes</strong>
+          </span>
+        </label>
+        <label class="choice">
+          <input type="radio" name="mark_read_after" value="3600">
+          <span>
+            <strong>1 hour</strong>
+          </span>
+        </label>
+        <label class="choice">
+          <input type="radio" name="mark_read_after" value="7200">
+          <span>
+            <strong>2 hours</strong>
+          </span>
+        </label>
+        <label class="choice">
+          <input type="radio" name="mark_read_after" value="86400">
+          <span>
+            <strong>1 day</strong>
+          </span>
+        </label>
+      </div>
+    </section>
+
     <button id="save" type="button">Save settings</button>
     <footer>OpenCode Status settings</footer>
   </main>
@@ -226,13 +276,18 @@
 
       var injectedRate = Number('__OC_POLL_RATE__');
       var injectedOnly = '__OC_ONLY_ACTION__';
+      var injectedMarkRead = Number('__OC_MARK_READ_AFTER__');
       var rate = isFinite(injectedRate) ? injectedRate : Number(optionParam('poll_rate', '0'));
       var onlyAction = injectedOnly === '1' ? true :
                        injectedOnly === '0' ? false :
                        optionParam('only_action', '0') === '1';
+      var markReadAfter = isFinite(injectedMarkRead) ? injectedMarkRead :
+                          Number(optionParam('mark_read_after', '0'));
       var radios = document.querySelectorAll('input[name="poll_rate"]');
+      var markRadios = document.querySelectorAll('input[name="mark_read_after"]');
       var checkbox = document.getElementById('only_action');
       var hasRate = false;
+      var hasMarkRead = false;
 
       Array.prototype.forEach.call(radios, function (radio) {
         if (Number(radio.value) === rate) {
@@ -241,13 +296,22 @@
         }
       });
       if (!hasRate) radios[0].checked = true;
+      Array.prototype.forEach.call(markRadios, function (radio) {
+        if (Number(radio.value) === markReadAfter) {
+          radio.checked = true;
+          hasMarkRead = true;
+        }
+      });
+      if (!hasMarkRead) markRadios[0].checked = true;
       checkbox.checked = onlyAction;
 
       document.getElementById('save').addEventListener('click', function () {
         var selected = document.querySelector('input[name="poll_rate"]:checked');
+        var selectedMarkRead = document.querySelector('input[name="mark_read_after"]:checked');
         var options = {
           poll_rate: selected ? Number(selected.value) : 0,
-          only_action: checkbox.checked ? 1 : 0
+          only_action: checkbox.checked ? 1 : 0,
+          mark_read_after: selectedMarkRead ? Number(selectedMarkRead.value) : 0
         };
         document.location = returnTo + encodeURIComponent(JSON.stringify(options));
       });

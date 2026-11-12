@@ -1924,7 +1924,7 @@ static void send_hello(void *data) {
   if (s_have_list) return;
   DictionaryIterator *out;
   if (app_message_outbox_begin(&out) == APP_MSG_OK) {
-    dict_write_uint8(out, MESSAGE_KEY_req, 1);
+    dict_write_uint8(out, MESSAGE_KEY_req, 2);
     app_message_outbox_send();
   }
   s_connect_timer = app_timer_register(3000, send_hello, NULL);

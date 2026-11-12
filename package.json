@@ -1,7 +1,7 @@
 {
   "name": "oc-status",
   "author": "OpenCode for Pebble contributors",
-  "version": "1.5.2",
+  "version": "1.6.0",
   "keywords": [
     "pebble-app"
   ],

@@ -30,6 +30,9 @@ var CONFIG_PAGE = require('./config-page.json').html;
 var SAVED_SETTINGS = readObject(KEY_SETTINGS, {});
 var SAVED_POLL_RATE = Number(SAVED_SETTINGS.poll_rate);
 if ([0, 10, 30, 60].indexOf(SAVED_POLL_RATE) === -1) SAVED_POLL_RATE = 0;
+var MARK_READ_AFTER_VALUES = [0, 300, 900, 1800, 3600, 7200, 86400];
+var SAVED_MARK_READ_AFTER = Number(SAVED_SETTINGS.mark_read_after);
+if (MARK_READ_AFTER_VALUES.indexOf(SAVED_MARK_READ_AFTER) === -1) SAVED_MARK_READ_AFTER = 0;
 
 var state = {
   installed: null,
@@ -56,6 +59,8 @@ var state = {
   subscribed: false,
   pollRateSec: SAVED_POLL_RATE,
   onlyAction: !!SAVED_SETTINGS.only_action,
+  markReadAfterSec: SAVED_MARK_READ_AFTER,
+  autoReadChecked: false,
   pollTimer: null,
   polling: false,
   pollGeneration: 0,
@@ -107,8 +112,11 @@ function propBool(property) {
 }
 
 function propNumber(property) {
-  if (!property || !property.numericValue) return 0;
-  var value = property.numericValue.value;
+  if (!property) return 0;
+  var value;
+  if (property.numericValue) value = property.numericValue.value;
+  else if (property.timestamp) value = property.timestamp.value;
+  else return 0;
   return typeof value === 'number' && isFinite(value) ? value : 0;
 }
 
@@ -582,6 +590,7 @@ function onChatStatus(envelope) {
     rememberSession(entry.sessionId, entry.name, entry.updated);
   });
   state.chatStatus = map;
+  maybeAutoMarkRead();
   rebuild();
 }
 
@@ -1182,6 +1191,51 @@ function markSessionRead(sessionId, messageId) {
   }
 }
 
+function autoMarkRead(sessionId, messageId) {
+  var key = 'auto|' + sessionId + '|' + (messageId || '');
+  if (state.markReadInFlight[key] || state.markReadDone[key]) return;
+  state.markReadInFlight[key] = true;
+  var args = { session_id: sessionId };
+  if (messageId) args.message_id = messageId;
+  Promise.resolve().then(function () {
+    return Pebble.invokeAction({
+      plugin: OPENCODE_UUID,
+      action: 'mark_chat_read',
+      args: args
+    });
+  }).then(function () {
+    state.markReadInFlight[key] = false;
+    state.markReadDone[key] = true;
+    var doneKeys = Object.keys(state.markReadDone);
+    if (doneKeys.length > 100) delete state.markReadDone[doneKeys[0]];
+    markSessionRead(sessionId, messageId);
+    rebuild(true);
+  }).catch(function (error) {
+    state.markReadInFlight[key] = false;
+    log('auto mark read failed: ' + errorCode(error));
+  });
+}
+
+function maybeAutoMarkRead() {
+  if (state.autoReadChecked) return;
+  if (state.markReadAfterSec <= 0) {
+    state.autoReadChecked = true;
+    return;
+  }
+  if (!Object.keys(state.chatStatus).length) return;
+  state.autoReadChecked = true;
+  var now = Math.floor(Date.now() / 1000);
+  Object.keys(state.chatStatus).forEach(function (sessionId) {
+    var status = state.chatStatus[sessionId];
+    if (!status || !status.unread) return;
+    if (status.permissionCount > 0 || status.questionCount > 0) return;
+    if (status.reason === 'Permission' || status.reason === 'Question') return;
+    if (!status.updated) return;
+    if (now - status.updated < state.markReadAfterSec) return;
+    autoMarkRead(sessionId, status.messageId || '');
+  });
+}
+
 function markChatRead(sessionId, messageId) {
   if (!sessionId || !messageId) return;
   var entry = replyEntryFor(sessionId);
@@ -1496,9 +1550,11 @@ function applyPollingMode() {
 }
 
 function applySettings(options) {
-  if (!options || (options.poll_rate === undefined && options.only_action === undefined)) return;
+  if (!options || (options.poll_rate === undefined && options.only_action === undefined &&
+      options.mark_read_after === undefined)) return;
   var rateChanged = false;
   var filterChanged = false;
+  var markChanged = false;
   if (options.poll_rate !== undefined) {
     var rate = Number(options.poll_rate);
     if ([0, 10, 30, 60].indexOf(rate) === -1) rate = 0;
@@ -1510,12 +1566,21 @@ function applySettings(options) {
     filterChanged = only !== state.onlyAction;
     state.onlyAction = only;
   }
+  if (options.mark_read_after !== undefined) {
+    var markReadAfter = Number(options.mark_read_after);
+    if (MARK_READ_AFTER_VALUES.indexOf(markReadAfter) === -1) markReadAfter = 0;
+    markChanged = markReadAfter !== state.markReadAfterSec;
+    state.markReadAfterSec = markReadAfter;
+    if (markChanged) state.autoReadChecked = false;
+  }
   writeObject(KEY_SETTINGS, {
     poll_rate: state.pollRateSec,
-    only_action: state.onlyAction ? 1 : 0
+    only_action: state.onlyAction ? 1 : 0,
+    mark_read_after: state.markReadAfterSec
   });
   if (rateChanged) applyPollingMode();
   if (filterChanged) rebuild(true);
+  if (markChanged) maybeAutoMarkRead();
 }
 
 function subscribeSource(category, item, key, onData) {
@@ -1652,6 +1717,10 @@ function finishPromptUpload() {
 function handleWatchMessage(payload) {
   if (!payload) return;
   if (payload.req) {
+    if (Number(payload.req) === 2) {
+      state.autoReadChecked = false;
+      maybeAutoMarkRead();
+    }
     ensurePlugin();
     sendList(true);
   }
@@ -1708,7 +1777,8 @@ Pebble.addEventListener('appmessage', function (event) {
 Pebble.addEventListener('showConfiguration', function () {
   var html = CONFIG_PAGE
     .replace(/__OC_POLL_RATE__/g, String(state.pollRateSec))
-    .replace(/__OC_ONLY_ACTION__/g, state.onlyAction ? '1' : '0');
+    .replace(/__OC_ONLY_ACTION__/g, state.onlyAction ? '1' : '0')
+    .replace(/__OC_MARK_READ_AFTER__/g, String(state.markReadAfterSec));
   Pebble.openURL('data:text/html;charset=utf-8,' + encodeURIComponent(html));
 });
 

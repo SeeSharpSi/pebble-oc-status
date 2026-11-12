@@ -222,7 +222,7 @@ function chatStatusRow(sessionId, title, options = {}) {
       permission_count: { numericValue: { value: options.permissionCount || 0 } },
       question_count: { numericValue: { value: options.questionCount || 0 } },
       unread: { boolean: { value: !!options.unread } },
-      updated: { timestamp: { value: 1700000000 } },
+      updated: { timestamp: { value: options.updated || 1700000000 } },
       is_default: { boolean: { value: !!options.isDefault } },
       is_subagent: { boolean: { value: false } },
       url: { longText: { text: '' } }
@@ -599,6 +599,7 @@ test('showConfiguration opens the on-device settings page', () => {
   const html = decodeURIComponent(h.opened[0].slice('data:text/html;charset=utf-8,'.length));
   assert.match(html, /var injectedRate = Number\('0'\);/);
   assert.match(html, /var injectedOnly = '0';/);
+  assert.match(html, /var injectedMarkRead = Number\('0'\);/);
   assert.match(html, /<h1>OpenCode Status<\/h1>/);
 });
 
@@ -650,6 +651,43 @@ test('custom poll rate stops subscriptions and reads sources on its own', async 
 
   h.handlers.webviewclosed({ response: encodeURIComponent(JSON.stringify({ poll_rate: 0, only_action: 0 })) });
   assert.ok(h.subscriptions.length > 0, 'subscriptions restored');
+});
+
+test('mark-read-after dismisses old unread replies on load', async () => {
+  const h = harness();
+  h.handlers.webviewclosed({
+    response: encodeURIComponent(JSON.stringify({ mark_read_after: 900 }))
+  });
+  const now = Math.floor(Date.now() / 1000);
+  h.fire('opencode', 'chat_status', {
+    instances: [
+      chatStatusRow('ses_old', 'Old unread', {
+        reason: 'Unread', unread: true, messageId: 'msg_old', updated: 1700000000
+      }),
+      chatStatusRow('ses_new', 'Fresh unread', {
+        reason: 'Unread', unread: true, messageId: 'msg_new', updated: now
+      }),
+      chatStatusRow('ses_perm', 'Permission unread', {
+        reason: 'Permission', unread: true, permissionCount: 1,
+        messageId: 'msg_perm', updated: 1700000000
+      })
+    ]
+  });
+  await new Promise((resolve) => setImmediate(resolve));
+
+  assert.equal(h.actions.length, 1);
+  assert.equal(h.actions[0].action, 'mark_chat_read');
+  assert.deepEqual(JSON.parse(JSON.stringify(h.actions[0].args)), {
+    session_id: 'ses_old',
+    message_id: 'msg_old'
+  });
+  const sessions = h.sessionMessages(h.takeSent());
+  const flags = Object.fromEntries(sessions.map((session) => [session.id, session.flags]));
+  assert.equal(flags.ses_old & 8, 0, 'old unread cleared');
+  assert.ok(flags.ses_new & 8, 'fresh unread kept');
+  assert.ok(flags.ses_perm & 0x20, 'permission kept');
+  const settings = JSON.parse(h.storage.get('ocstatus.settings.v1'));
+  assert.equal(settings.mark_read_after, 900);
 });
 
 test('permission detail routes before replies and approves once', async () => {
