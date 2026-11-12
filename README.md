@@ -30,6 +30,18 @@ plugin knows about and lets you open them from the watch.
 The watch UI is C. All plugin access is in `src/pkjs/index.js`; the watch only receives a small
 flat session list and one detail at a time over AppMessage.
 
+## Settings
+
+The last row in the session list opens **Settings** on colour watches.
+
+- **Plugin polling**: **Plugin default** keeps the plugin's own suggested refresh intervals.
+  Choosing 10, 30, or 60 seconds makes the app poll the chat list, active sessions, chat status, and
+  questions on its own timer and stop its plugin subscriptions. Reply text is still read on demand.
+- **Only active/action**: hides sessions that are neither running nor asking for attention. Unread
+  replies, permission requests, and questions remain visible. An empty list shows **No action**.
+
+Settings are stored on the watch. Aplite keeps plugin defaults and has no Settings row.
+
 ## Chat status, unread, and replies
 
 `opencode/chat_status` drives the list dots. It supplies `needs_action`, `reason`,

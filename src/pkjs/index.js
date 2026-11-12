@@ -24,6 +24,11 @@ var FLAG_PERMISSION = 0x20;
 var KEY_UNVIEWED = 'ocstatus.unviewed.v1';
 var KEY_VIEWED_REPLY = 'ocstatus.viewedReply.v1';
 var KEY_KNOWN = 'ocstatus.known.v1';
+var KEY_SETTINGS = 'ocstatus.settings.v1';
+
+var SAVED_SETTINGS = readObject(KEY_SETTINGS, {});
+var SAVED_POLL_RATE = Number(SAVED_SETTINGS.poll_rate);
+if ([0, 10, 30, 60].indexOf(SAVED_POLL_RATE) === -1) SAVED_POLL_RATE = 0;
 
 var state = {
   installed: null,
@@ -48,6 +53,11 @@ var state = {
   suppressUnviewedUntil: {},
   subscriptions: [],
   subscribed: false,
+  pollRateSec: SAVED_POLL_RATE,
+  onlyAction: !!SAVED_SETTINGS.only_action,
+  pollTimer: null,
+  polling: false,
+  pollGeneration: 0,
   listSignature: '',
   detailSession: '',
   detailKind: '',
@@ -324,6 +334,7 @@ function statusText() {
   if (attention > 0) return attention + (attention === 1 ? ' needs you' : ' need you');
   var active = state.active.length;
   if (active > 0) return active + ' active';
+  if (state.onlyAction && sessions.length === 0) return 'No action';
   if (sessions.length > 0) return 'No active';
   return state.installed ? 'No sessions' : 'Connecting...';
 }
@@ -426,6 +437,11 @@ function mergedSessions() {
   knownOnly(false).forEach(function (id) { add(id, state.known[id].name, state.known[id].updated); });
   Object.keys(state.questions).forEach(function (id) { add(id, 'Question', 0); });
 
+  if (state.onlyAction) {
+    list = list.filter(function (session) {
+      return (session.flags & (FLAG_RUNNING | FLAG_ATTENTION | FLAG_UNVIEWED)) !== 0;
+    });
+  }
   return list.slice(0, MAX_SESSIONS);
 }
 
@@ -1403,6 +1419,104 @@ function handleDetailRequest(sessionId) {
 
 // ---------------------------------------------------------------- subscriptions
 
+function stopSubscriptions() {
+  state.subscriptions.forEach(function (subscription) {
+    try {
+      if (subscription && typeof subscription.unsubscribe === 'function') subscription.unsubscribe();
+    } catch (e) {
+      log('unsubscribe failed: ' + e);
+    }
+  });
+  state.subscriptions = [];
+  state.subscribed = false;
+}
+
+function stopPolling() {
+  state.pollGeneration += 1;
+  if (state.pollTimer) {
+    clearTimeout(state.pollTimer);
+    state.pollTimer = null;
+  }
+  state.polling = false;
+}
+
+function pollRead(category, item, key, handler) {
+  if (typeof Pebble.readSource !== 'function') return Promise.resolve();
+  return Pebble.readSource({
+    plugin: OPENCODE_UUID,
+    category: category,
+    item: item
+  }).then(function (envelope) {
+    state.errors[key] = null;
+    handler(envelope);
+  }).catch(function (error) {
+    state.errors[key] = errorCode(error);
+    log(key + ' poll error: ' + errorCode(error));
+  });
+}
+
+function schedulePoll(generation) {
+  if (state.pollGeneration !== generation || state.pollRateSec <= 0 || !state.installed) return;
+  state.pollTimer = setTimeout(function () {
+    state.pollTimer = null;
+    pollSources();
+  }, state.pollRateSec * 1000);
+}
+
+function pollSources() {
+  if (state.pollRateSec <= 0 || !state.installed || state.polling) return;
+  var generation = state.pollGeneration;
+  state.polling = true;
+  var reads = [
+    pollRead('agent', 'configured', 'configured', onConfigured),
+    pollRead('agent', 'chats', 'chats', onChats),
+    pollRead('opencode', 'active_session', 'active', onActive),
+    pollRead('opencode', 'chat_status', 'chatStatus', onChatStatus),
+    pollRead('opencode', 'question', 'question', onQuestions)
+  ];
+  Promise.all(reads).then(function () {
+    if (state.pollGeneration !== generation) return;
+    state.polling = false;
+    rebuild(true);
+    schedulePoll(generation);
+  });
+}
+
+function applyPollingMode() {
+  if (state.pollRateSec > 0) {
+    stopSubscriptions();
+    stopPolling();
+    if (state.installed) pollSources();
+  } else {
+    stopPolling();
+    if (state.installed) startSubscriptions();
+  }
+  rebuild(true);
+}
+
+function applyWatchSettings(payload) {
+  if (!payload || (payload.poll_rate === undefined && payload.only_action === undefined)) return;
+  var rateChanged = false;
+  var filterChanged = false;
+  if (payload.poll_rate !== undefined) {
+    var rate = Number(payload.poll_rate);
+    if ([0, 10, 30, 60].indexOf(rate) === -1) rate = 0;
+    rateChanged = rate !== state.pollRateSec;
+    state.pollRateSec = rate;
+  }
+  if (payload.only_action !== undefined) {
+    var only = !!payload.only_action;
+    filterChanged = only !== state.onlyAction;
+    state.onlyAction = only;
+  }
+  writeObject(KEY_SETTINGS, {
+    poll_rate: state.pollRateSec,
+    only_action: state.onlyAction ? 1 : 0
+  });
+  if (rateChanged) applyPollingMode();
+  if (filterChanged) rebuild(true);
+}
+
 function subscribeSource(category, item, key, onData) {
   try {
     state.subscriptions.push(Pebble.subscribeToSource({
@@ -1444,8 +1558,7 @@ function ensurePlugin() {
   if (state.installed) return;
   if (pluginInstalled()) {
     state.installed = true;
-    startSubscriptions();
-    rebuild(true);
+    applyPollingMode();
   }
 }
 
@@ -1537,6 +1650,7 @@ function finishPromptUpload() {
 
 function handleWatchMessage(payload) {
   if (!payload) return;
+  applyWatchSettings(payload);
   if (payload.req) {
     ensurePlugin();
     sendList(true);
@@ -1593,6 +1707,9 @@ Pebble.addEventListener('appmessage', function (event) {
 
 Pebble.addEventListener('ready', function () {
   state.installed = pluginInstalled();
-  if (state.installed) startSubscriptions();
-  rebuild(true);
+  if (state.installed) {
+    applyPollingMode();
+  } else {
+    rebuild(true);
+  }
 });

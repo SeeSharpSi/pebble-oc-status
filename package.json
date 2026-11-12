@@ -1,7 +1,7 @@
 {
   "name": "oc-status",
   "author": "OpenCode for Pebble contributors",
-  "version": "1.4.4",
+  "version": "1.5.0",
   "keywords": [
     "pebble-app"
   ],
@@ -87,6 +87,8 @@
       "clear_completed",
       "clear_ok",
       "clear_text",
+      "poll_rate",
+      "only_action",
       "permission_request_id",
       "permission_decision",
       "permission_choice"

@@ -14,6 +14,9 @@ function harness(options = {}) {
   const sent = [];
   const storage = new Map();
   const actions = [];
+  const sourceEnvelopes = new Map();
+  const timers = new Map();
+  let nextTimer = 0;
   let replyEnvelope = options.reply || null;
   let repliesEnvelope = options.replies || null;
   let permissionEnvelope = options.permission || null;
@@ -25,7 +28,12 @@ function harness(options = {}) {
     },
     subscribeToSource(config) {
       subscriptions.push(config);
-      return { unsubscribe() {} };
+      return {
+        unsubscribe() {
+          const index = subscriptions.indexOf(config);
+          if (index >= 0) subscriptions.splice(index, 1);
+        }
+      };
     },
     readSource(request) {
       if (request.item === 'reply' && replyEnvelope) return Promise.resolve(replyEnvelope);
@@ -33,6 +41,7 @@ function harness(options = {}) {
       if (request.item === 'permission') {
         return Promise.resolve(permissionEnvelope || { instances: [] });
       }
+      if (sourceEnvelopes.has(request.item)) return Promise.resolve(sourceEnvelopes.get(request.item));
       return Promise.reject(Object.assign(new Error('No reply'), { code: 'PLUGIN_UNAVAILABLE' }));
     },
     invokeAction(request) {
@@ -56,7 +65,12 @@ function harness(options = {}) {
       setItem(key, value) { storage.set(key, String(value)); },
       removeItem(key) { storage.delete(key); }
     },
-    setTimeout(callback) { callback(); },
+    setTimeout(callback) {
+      const id = ++nextTimer;
+      timers.set(id, callback);
+      return id;
+    },
+    clearTimeout(id) { timers.delete(id); },
     Promise,
     Date,
     JSON,
@@ -86,6 +100,12 @@ function harness(options = {}) {
     return sent.splice(0, sent.length);
   }
 
+  function runTimers() {
+    const due = Array.from(timers.values());
+    timers.clear();
+    due.forEach((callback) => callback());
+  }
+
   function sessionMessages(messages) {
     const end = messages.map((message, index) => message.list_end ? index : -1).filter((index) => index >= 0).pop();
     const start = end === undefined ? 0 : messages.reduce((found, message, index) => {
@@ -103,10 +123,11 @@ function harness(options = {}) {
   }
 
   return {
-    Pebble, handlers, subscriptions, actions, fire, watch, takeSent, sessionMessages,
+    Pebble, handlers, subscriptions, actions, fire, watch, takeSent, sessionMessages, runTimers,
     setReply(envelope) { replyEnvelope = envelope; },
     setReplies(envelope) { repliesEnvelope = envelope; },
     setPermission(envelope) { permissionEnvelope = envelope; },
+    setSource(item, envelope) { sourceEnvelopes.set(item, envelope); },
     setInstalled(value) { installed = value; },
     storage
   };
@@ -558,6 +579,56 @@ test('question text and answer descriptions are sent to the watch', () => {
   assert.equal(detail.choice_index, 0);
   assert.equal(detail.choice_label, 'Include it');
   assert.equal(detail.choice_description, 'Commit the tagline change and deploy it with the new theme.');
+});
+
+test('only-action filter hides read sessions and persists', () => {
+  const h = harness();
+  h.fire('agent', 'chats', {
+    instances: [chat('ses_a', 'Active chat'), chat('ses_b', 'Unread chat'), chat('ses_c', 'Read chat')]
+  });
+  h.fire('opencode', 'active_session', { instances: [session('ses_a', 'Active chat')] });
+  h.fire('opencode', 'chat_status', {
+    instances: [chatStatusRow('ses_b', 'Unread chat', {
+      reason: 'Unread', unread: true, messageId: 'msg_b'
+    })]
+  });
+  h.takeSent();
+
+  h.watch({ poll_rate: 0, only_action: 1 });
+  let sessions = h.sessionMessages(h.takeSent());
+  assert.deepEqual(sessions.map((entry) => entry.id), ['ses_a', 'ses_b']);
+  let settings = JSON.parse(h.storage.get('ocstatus.settings.v1'));
+  assert.equal(settings.only_action, 1);
+  assert.equal(settings.poll_rate, 0);
+
+  h.watch({ poll_rate: 0, only_action: 0 });
+  sessions = h.sessionMessages(h.takeSent());
+  assert.deepEqual(sessions.map((entry) => entry.id), ['ses_a', 'ses_b', 'ses_c']);
+  settings = JSON.parse(h.storage.get('ocstatus.settings.v1'));
+  assert.equal(settings.only_action, 0);
+});
+
+test('custom poll rate stops subscriptions and reads sources on its own', async () => {
+  const h = harness();
+  h.setSource('configured', { instances: [{
+    properties: { configured: { boolean: { value: true } } }
+  }] });
+  h.setSource('chats', { instances: [chat('ses_a', 'Polled chat')] });
+  h.setSource('active_session', { instances: [session('ses_a', 'Polled chat')] });
+  h.setSource('chat_status', { instances: [chatStatusRow('ses_a', 'Polled chat')] });
+  h.setSource('question', { instances: [] });
+  h.takeSent();
+  assert.ok(h.subscriptions.length > 0);
+
+  h.watch({ poll_rate: 10, only_action: 0 });
+  await new Promise((resolve) => setImmediate(resolve));
+  assert.equal(h.subscriptions.length, 0, 'subscriptions stopped');
+  const sessions = h.sessionMessages(h.takeSent());
+  assert.equal(sessions.length, 1);
+  assert.equal(sessions[0].id, 'ses_a');
+
+  h.watch({ poll_rate: 0, only_action: 0 });
+  assert.ok(h.subscriptions.length > 0, 'subscriptions restored');
 });
 
 test('permission detail routes before replies and approves once', async () => {
