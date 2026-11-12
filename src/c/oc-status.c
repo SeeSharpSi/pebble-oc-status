@@ -1011,8 +1011,8 @@ static void detail_question_back_click(ClickRecognizerRef recognizer, void *cont
 
 static void detail_scroll_click_config(void *context) {
   window_single_click_subscribe(BUTTON_ID_SELECT, detail_select_click);
-  // Start dictation after release, so the same press cannot also select a canned row.
-  window_long_click_subscribe(BUTTON_ID_SELECT, 500, NULL, detail_dictation_long_click);
+  // Start dictation as soon as the long-press threshold is reached, without waiting for release.
+  window_long_click_subscribe(BUTTON_ID_SELECT, 500, detail_dictation_long_click, NULL);
 #ifndef PBL_PLATFORM_APLITE
   if (s_detail_mode == DETAIL_QUESTION_TEXT || s_detail_mode == DETAIL_ANSWER_TEXT) {
     window_single_click_subscribe(BUTTON_ID_BACK, detail_question_back_click);
