@@ -41,7 +41,8 @@ Open **OpenCode Status** in the Pebble app and use its settings page (the gear i
   replies, permission requests, and questions remain visible. An empty list shows **No action**.
 
 Settings are stored by the phone-side app and applied the next time the watch app refreshes. The
-settings page is also available for Aplite.
+settings page is also available for Aplite. It is hosted at
+`https://seesharpsi.github.io/pebble-oc-status/config.html`.
 
 ## Chat status, unread, and replies
 
