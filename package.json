@@ -1,13 +1,14 @@
 {
   "name": "oc-status",
   "author": "OpenCode for Pebble contributors",
-  "version": "1.5.1",
+  "version": "1.5.2",
   "keywords": [
     "pebble-app"
   ],
   "private": true,
   "scripts": {
-    "test": "node --test test/*.test.js"
+    "test": "node --test test/*.test.js",
+    "embed-config": "node scripts/embed-config.js"
   },
   "dependencies": {},
   "pebble": {

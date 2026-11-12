@@ -208,8 +208,10 @@
     (function () {
       'use strict';
 
-      function queryParam(name, fallback) {
-        var pairs = location.search.replace(/^\?/, '').split('&');
+      function optionParam(name, fallback) {
+        var source = location.hash.replace(/^#/, '');
+        if (!source) source = location.search.replace(/^\?/, '');
+        var pairs = source.split('&');
         for (var i = 0; i < pairs.length; i += 1) {
           var pair = pairs[i].split('=');
           if (decodeURIComponent(pair[0]) === name) {
@@ -219,11 +221,15 @@
         return fallback;
       }
 
-      var returnTo = queryParam('return_to', 'pebblejs://close#');
+      var returnTo = optionParam('return_to', 'pebblejs://close#');
       if (returnTo.indexOf('#') === -1) returnTo += '#';
 
-      var rate = Number(queryParam('poll_rate', '0'));
-      var onlyAction = queryParam('only_action', '0') === '1';
+      var injectedRate = Number('__OC_POLL_RATE__');
+      var injectedOnly = '__OC_ONLY_ACTION__';
+      var rate = isFinite(injectedRate) ? injectedRate : Number(optionParam('poll_rate', '0'));
+      var onlyAction = injectedOnly === '1' ? true :
+                       injectedOnly === '0' ? false :
+                       optionParam('only_action', '0') === '1';
       var radios = document.querySelectorAll('input[name="poll_rate"]');
       var checkbox = document.getElementById('only_action');
       var hasRate = false;

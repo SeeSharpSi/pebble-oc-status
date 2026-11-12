@@ -25,7 +25,7 @@ var KEY_UNVIEWED = 'ocstatus.unviewed.v1';
 var KEY_VIEWED_REPLY = 'ocstatus.viewedReply.v1';
 var KEY_KNOWN = 'ocstatus.known.v1';
 var KEY_SETTINGS = 'ocstatus.settings.v1';
-var CONFIG_URL = 'https://seesharpsi.github.io/pebble-oc-status/config.html';
+var CONFIG_PAGE = require('./config-page.json').html;
 
 var SAVED_SETTINGS = readObject(KEY_SETTINGS, {});
 var SAVED_POLL_RATE = Number(SAVED_SETTINGS.poll_rate);
@@ -1706,10 +1706,10 @@ Pebble.addEventListener('appmessage', function (event) {
 });
 
 Pebble.addEventListener('showConfiguration', function () {
-  var url = CONFIG_URL +
-    '?poll_rate=' + encodeURIComponent(state.pollRateSec) +
-    '&only_action=' + (state.onlyAction ? '1' : '0');
-  Pebble.openURL(url);
+  var html = CONFIG_PAGE
+    .replace(/__OC_POLL_RATE__/g, String(state.pollRateSec))
+    .replace(/__OC_ONLY_ACTION__/g, state.onlyAction ? '1' : '0');
+  Pebble.openURL('data:text/html;charset=utf-8,' + encodeURIComponent(html));
 });
 
 Pebble.addEventListener('webviewclosed', function (event) {

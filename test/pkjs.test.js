@@ -75,6 +75,12 @@ function harness(options = {}) {
       return id;
     },
     clearTimeout(id) { timers.delete(id); },
+    require(name) {
+      if (name === './config-page.json') {
+        return JSON.parse(fs.readFileSync(path.join(__dirname, '..', 'src', 'pkjs', 'config-page.json'), 'utf8'));
+      }
+      throw new Error('Unexpected require: ' + name);
+    },
     Promise,
     Date,
     JSON,
@@ -585,14 +591,15 @@ test('question text and answer descriptions are sent to the watch', () => {
   assert.equal(detail.choice_description, 'Commit the tagline change and deploy it with the new theme.');
 });
 
-test('showConfiguration opens the hosted settings page', () => {
+test('showConfiguration opens the on-device settings page', () => {
   const h = harness();
   h.handlers.showConfiguration();
   assert.equal(h.opened.length, 1);
-  assert.equal(
-    h.opened[0],
-    'https://seesharpsi.github.io/pebble-oc-status/config.html?poll_rate=0&only_action=0'
-  );
+  assert.ok(h.opened[0].indexOf('data:text/html;charset=utf-8,') === 0);
+  const html = decodeURIComponent(h.opened[0].slice('data:text/html;charset=utf-8,'.length));
+  assert.match(html, /var injectedRate = Number\('0'\);/);
+  assert.match(html, /var injectedOnly = '0';/);
+  assert.match(html, /<h1>OpenCode Status<\/h1>/);
 });
 
 test('only-action filter hides read sessions and persists', () => {
