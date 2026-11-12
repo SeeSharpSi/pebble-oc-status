@@ -1217,6 +1217,7 @@ static void detail_window_load(Window *window) {
 
   s_detail_scroll = scroll_layer_create(GRect(0, DETAIL_BODY_Y, bounds.size.w,
                                                bounds.size.h - DETAIL_BODY_Y));
+  scroll_layer_set_shadow_hidden(s_detail_scroll, true);
   scroll_layer_set_callbacks(s_detail_scroll, (ScrollLayerCallbacks){
     .click_config_provider = detail_scroll_click_config,
   });
