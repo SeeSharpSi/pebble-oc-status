@@ -123,6 +123,17 @@
       flex: 1;
       cursor: pointer;
     }
+    textarea {
+      width: 100%;
+      min-height: 128px;
+      padding: 11px 12px;
+      border: 1px solid var(--border);
+      border-radius: 10px;
+      background: var(--panel);
+      color: var(--text);
+      font: 15px/1.4 ui-monospace, "SFMono-Regular", Menlo, Consolas, monospace;
+      resize: vertical;
+    }
     button {
       width: 100%;
       margin-top: 20px;
@@ -250,6 +261,12 @@
       </div>
     </section>
 
+    <section aria-labelledby="canned-title">
+      <h2 id="canned-title">Canned replies</h2>
+      <p class="hint">One per line, up to 8. Short-press Select on a reply to choose one; long-press to dictate.</p>
+      <textarea id="canned_replies" spellcheck="true" placeholder="Continue&#10;Yes&#10;No">__OC_CANNED_REPLIES__</textarea>
+    </section>
+
     <button id="save" type="button">Save settings</button>
     <footer>OpenCode Status settings</footer>
   </main>
@@ -286,6 +303,7 @@
       var radios = document.querySelectorAll('input[name="poll_rate"]');
       var markRadios = document.querySelectorAll('input[name="mark_read_after"]');
       var checkbox = document.getElementById('only_action');
+      var canned = document.getElementById('canned_replies');
       var hasRate = false;
       var hasMarkRead = false;
 
@@ -311,7 +329,8 @@
         var options = {
           poll_rate: selected ? Number(selected.value) : 0,
           only_action: checkbox.checked ? 1 : 0,
-          mark_read_after: selectedMarkRead ? Number(selectedMarkRead.value) : 0
+          mark_read_after: selectedMarkRead ? Number(selectedMarkRead.value) : 0,
+          canned_replies: canned.value.split(/\r?\n/)
         };
         document.location = returnTo + encodeURIComponent(JSON.stringify(options));
       });

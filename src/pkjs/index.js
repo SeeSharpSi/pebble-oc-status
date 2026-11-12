@@ -13,6 +13,11 @@ var REPLY_CHUNK_SIZE = 150;
 var REPLY_CHUNK_BYTES = 380;
 var KNOWN_LIMIT = 40;
 var KNOWN_MAX_AGE_SEC = 12 * 60 * 60;
+var SOURCE_READ_TIMEOUT_MS = 25000;
+var SOURCE_READ_CACHE_MS = 10000;
+var MAX_CANNED_REPLIES = 8;
+var CANNED_REPLY_MAX_LEN = 80;
+var DEFAULT_CANNED_REPLIES = ['Continue', 'Yes', 'No', 'Run tests'];
 
 var FLAG_RUNNING = 0x01;
 var FLAG_ATTENTION = 0x02;
@@ -33,6 +38,8 @@ if ([0, 10, 30, 60].indexOf(SAVED_POLL_RATE) === -1) SAVED_POLL_RATE = 0;
 var MARK_READ_AFTER_VALUES = [0, 300, 900, 1800, 3600, 7200, 86400];
 var SAVED_MARK_READ_AFTER = Number(SAVED_SETTINGS.mark_read_after);
 if (MARK_READ_AFTER_VALUES.indexOf(SAVED_MARK_READ_AFTER) === -1) SAVED_MARK_READ_AFTER = 0;
+var SAVED_CANNED_REPLIES = SAVED_SETTINGS.canned_replies === undefined ?
+  DEFAULT_CANNED_REPLIES.slice() : normalizeCannedReplies(SAVED_SETTINGS.canned_replies);
 
 var state = {
   installed: null,
@@ -60,10 +67,13 @@ var state = {
   pollRateSec: SAVED_POLL_RATE,
   onlyAction: !!SAVED_SETTINGS.only_action,
   markReadAfterSec: SAVED_MARK_READ_AFTER,
+  cannedReplies: SAVED_CANNED_REPLIES,
   autoReadChecked: false,
   pollTimer: null,
   polling: false,
   pollGeneration: 0,
+  resubscribeTimer: null,
+  resubscribeAttempts: 0,
   listSignature: '',
   detailSession: '',
   detailKind: '',
@@ -74,6 +84,8 @@ var state = {
 
 var sendQueue = [];
 var sending = false;
+var sourceReadCache = {};
+var sourceReadInFlight = {};
 
 // ---------------------------------------------------------------- small helpers
 
@@ -125,6 +137,31 @@ function cleanName(value) {
   text = text.replace(/\s+/g, ' ');
   if (text.length > 54) text = text.slice(0, 54);
   return text || 'Untitled';
+}
+
+function normalizeCannedReplies(value) {
+  var items = Array.isArray(value) ? value :
+              typeof value === 'string' ? value.split(/\r?\n/) : [];
+  var out = [];
+  var seen = {};
+  items.forEach(function (item) {
+    if (out.length >= MAX_CANNED_REPLIES) return;
+    var text = item === undefined || item === null ? '' : String(item);
+    text = text.replace(/[\r\n\t]+/g, ' ').replace(/\s+/g, ' ').trim();
+    if (!text) return;
+    if (text.length > CANNED_REPLY_MAX_LEN) text = text.slice(0, CANNED_REPLY_MAX_LEN);
+    if (seen[text]) return;
+    seen[text] = true;
+    out.push(text);
+  });
+  return out;
+}
+
+function escapeHtml(value) {
+  return String(value)
+    .replace(/&/g, '&amp;')
+    .replace(/</g, '&lt;')
+    .replace(/>/g, '&gt;');
 }
 
 function unicodeChunks(text, maxBytes, maxChars) {
@@ -186,66 +223,96 @@ function shortErrorText(error) {
 
 // PebbleKit JS apps can only subscribe to plugin sources; they cannot read one directly.
 // A short-lived subscription is the read: take the first snapshot, then unsubscribe.
-function readSourceOnce(category, item) {
-  if (typeof Pebble.readSource === 'function') {
-    return Pebble.readSource({
-      plugin: OPENCODE_UUID,
-      category: category,
-      item: item,
-      maxStalenessMs: 0
-    });
+// Reads share an in-flight promise and a short cache so opening several chats, or reopening
+// one, does not start a cold plugin request every time.
+function readSourceOnce(category, item, options) {
+  var key = category + '/' + item;
+  var maxAgeMs = options && options.maxAgeMs !== undefined ?
+    Number(options.maxAgeMs) : SOURCE_READ_CACHE_MS;
+  var cached = sourceReadCache[key];
+  if (cached && Date.now() - cached.at <= maxAgeMs) {
+    return Promise.resolve(cached.envelope);
   }
-  return new Promise(function (resolve, reject) {
-    var subscription = null;
-    var timer = null;
-    var settled = false;
-    function finish(error, envelope) {
-      if (settled) return;
-      settled = true;
-      if (timer) {
-        clearTimeout(timer);
-        timer = null;
-      }
-      if (subscription) {
-        try {
-          subscription.unsubscribe();
-        } catch (e) {
-          log('one-shot unsubscribe failed: ' + e);
-        }
-        subscription = null;
-      }
-      if (error) reject(error);
-      else resolve(envelope);
-    }
-    timer = setTimeout(function () {
-      finish({ code: 'TIMEOUT', message: 'Source timed out' });
-    }, 12000);
+  if (sourceReadInFlight[key]) return sourceReadInFlight[key];
+
+  var request;
+  if (typeof Pebble.readSource === 'function') {
     try {
-      var created = Pebble.subscribeToSource({
+      request = Pebble.readSource({
         plugin: OPENCODE_UUID,
         category: category,
         item: item,
-        maxStalenessMs: 0,
-        onData: function (envelope) {
-          finish(null, envelope);
-        },
-        onError: function (error) {
-          finish(error || { code: 'PLUGIN_UNAVAILABLE' });
-        }
+        maxStalenessMs: 0
       });
-      if (settled) {
-        try {
-          created.unsubscribe();
-        } catch (e2) {
-          log('one-shot cleanup failed: ' + e2);
-        }
-      } else {
-        subscription = created;
-      }
     } catch (e) {
-      finish(e);
+      request = Promise.reject(e);
     }
+  } else {
+    request = new Promise(function (resolve, reject) {
+      var subscription = null;
+      var timer = null;
+      var settled = false;
+      function finish(error, envelope) {
+        if (settled) return;
+        settled = true;
+        if (timer) {
+          clearTimeout(timer);
+          timer = null;
+        }
+        if (subscription) {
+          try {
+            subscription.unsubscribe();
+          } catch (e) {
+            log('one-shot unsubscribe failed: ' + e);
+          }
+          subscription = null;
+        }
+        if (error) reject(error);
+        else resolve(envelope);
+      }
+      // The phone gives a plugin request 20 seconds. Do not time out before the plugin can
+      // answer a cold start.
+      timer = setTimeout(function () {
+        finish({ code: 'TIMEOUT', message: 'Source timed out' });
+      }, SOURCE_READ_TIMEOUT_MS);
+      try {
+        var created = Pebble.subscribeToSource({
+          plugin: OPENCODE_UUID,
+          category: category,
+          item: item,
+          maxStalenessMs: 0,
+          onData: function (envelope) {
+            finish(null, envelope);
+          },
+          onError: function (error) {
+            finish(error || { code: 'PLUGIN_UNAVAILABLE' });
+          }
+        });
+        if (settled) {
+          try {
+            created.unsubscribe();
+          } catch (e2) {
+            log('one-shot cleanup failed: ' + e2);
+          }
+        } else {
+          subscription = created;
+        }
+      } catch (e) {
+        finish(e);
+      }
+    });
+  }
+
+  var tracked = Promise.resolve(request).then(function (envelope) {
+    sourceReadCache[key] = { at: Date.now(), envelope: envelope };
+    delete sourceReadInFlight[key];
+    return envelope;
+  }, function (error) {
+    delete sourceReadInFlight[key];
+    throw error;
   });
+  sourceReadInFlight[key] = tracked;
+  return tracked;
 }
 
 // ---------------------------------------------------------------- outgoing messages
@@ -1534,6 +1601,34 @@ function handleDetailRequest(sessionId) {
 
 // ---------------------------------------------------------------- subscriptions
 
+function isRetiredError(error) {
+  var code = errorCode(error);
+  if (code === 'PLUGIN_RETIRED') return true;
+  var message = error && typeof error.message === 'string' ? error.message : '';
+  return /updated or removed|subscribe again|retired/i.test(message);
+}
+
+function cancelResubscribe() {
+  if (state.resubscribeTimer) {
+    clearTimeout(state.resubscribeTimer);
+    state.resubscribeTimer = null;
+  }
+  state.resubscribeAttempts = 0;
+}
+
+function scheduleResubscribe() {
+  if (!state.installed || state.pollRateSec > 0 || state.resubscribeTimer) return;
+  var delay = Math.min(30000, 3000 * Math.pow(2, state.resubscribeAttempts));
+  state.resubscribeAttempts += 1;
+  log('plugin source retired; resubscribing in ' + delay + ' ms');
+  state.resubscribeTimer = setTimeout(function () {
+    state.resubscribeTimer = null;
+    if (!state.installed || state.pollRateSec > 0) return;
+    stopSubscriptions();
+    startSubscriptions();
+  }, delay);
+}
+
 function stopSubscriptions() {
   state.subscriptions.forEach(function (subscription) {
     try {
@@ -1556,7 +1651,7 @@ function stopPolling() {
 }
 
 function pollRead(category, item, key, handler) {
-  return readSourceOnce(category, item).then(function (envelope) {
+  return readSourceOnce(category, item, { maxAgeMs: 0 }).then(function (envelope) {
     state.errors[key] = null;
     handler(envelope);
   }).catch(function (error) {
@@ -1594,11 +1689,13 @@ function pollSources() {
 
 function applyPollingMode() {
   if (state.pollRateSec > 0) {
+    cancelResubscribe();
     stopSubscriptions();
     stopPolling();
     if (state.installed) pollSources();
   } else {
     stopPolling();
+    cancelResubscribe();
     if (state.installed) startSubscriptions();
   }
   rebuild(true);
@@ -1606,7 +1703,7 @@ function applyPollingMode() {
 
 function applySettings(options) {
   if (!options || (options.poll_rate === undefined && options.only_action === undefined &&
-      options.mark_read_after === undefined)) return;
+      options.mark_read_after === undefined && options.canned_replies === undefined)) return;
   var rateChanged = false;
   var filterChanged = false;
   var markChanged = false;
@@ -1628,10 +1725,14 @@ function applySettings(options) {
     state.markReadAfterSec = markReadAfter;
     if (markChanged) state.autoReadChecked = false;
   }
+  if (options.canned_replies !== undefined) {
+    state.cannedReplies = normalizeCannedReplies(options.canned_replies);
+  }
   writeObject(KEY_SETTINGS, {
     poll_rate: state.pollRateSec,
     only_action: state.onlyAction ? 1 : 0,
-    mark_read_after: state.markReadAfterSec
+    mark_read_after: state.markReadAfterSec,
+    canned_replies: state.cannedReplies
   });
   if (rateChanged) applyPollingMode();
   if (filterChanged) rebuild(true);
@@ -1646,11 +1747,13 @@ function subscribeSource(category, item, key, onData) {
       item: item,
       onData: function (envelope) {
         state.errors[key] = null;
+        cancelResubscribe();
         onData(envelope);
       },
       onError: function (error) {
         state.errors[key] = errorCode(error);
         log(key + ' error: ' + errorCode(error) + ' ' + (error && error.message ? error.message : ''));
+        if (isRetiredError(error)) scheduleResubscribe();
         rebuild();
       }
     }));
@@ -1687,6 +1790,15 @@ function sendErrorText(error) {
   var text = error && typeof error.message === 'string' && error.message ? error.message : errorText(error);
   if (text.length > 220) text = text.slice(0, 220);
   return text;
+}
+
+function sendCannedReplies() {
+  var list = state.cannedReplies.slice(0, MAX_CANNED_REPLIES);
+  enqueue({ canned_begin: 1, canned_count: list.length });
+  list.forEach(function (text, index) {
+    enqueue({ canned_index: index, canned_text: text });
+  });
+  enqueue({ canned_end: 1, canned_count: list.length });
 }
 
 function sendPromptResult(ok, text, sessionId) {
@@ -1779,6 +1891,9 @@ function handleWatchMessage(payload) {
     ensurePlugin();
     sendList(true);
   }
+  if (payload.canned_req) {
+    sendCannedReplies();
+  }
   if (payload.send_prompt_begin) {
     beginPromptUpload(payload);
   }
@@ -1834,6 +1949,8 @@ Pebble.addEventListener('showConfiguration', function () {
     .replace(/__OC_POLL_RATE__/g, String(state.pollRateSec))
     .replace(/__OC_ONLY_ACTION__/g, state.onlyAction ? '1' : '0')
     .replace(/__OC_MARK_READ_AFTER__/g, String(state.markReadAfterSec));
+  html = html.split('__OC_CANNED_REPLIES__')
+    .join(escapeHtml(state.cannedReplies.join('\n')));
   Pebble.openURL('data:text/html;charset=utf-8,' + encodeURIComponent(html));
 });
 

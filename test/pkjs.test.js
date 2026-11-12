@@ -628,6 +628,80 @@ test('showConfiguration opens the on-device settings page', () => {
   assert.match(html, /var injectedOnly = '0';/);
   assert.match(html, /var injectedMarkRead = Number\('0'\);/);
   assert.match(html, /<h1>OpenCode Status<\/h1>/);
+  assert.ok(html.indexOf('>Continue\nYes\nNo\nRun tests</textarea>') !== -1);
+});
+
+test('canned replies are configurable, normalized, and sent on request', () => {
+  const h = harness();
+  h.handlers.webviewclosed({
+    response: encodeURIComponent(JSON.stringify({
+      canned_replies: [' Continue ', '', 'Run tests', 'Run tests', 'x'.repeat(100)]
+    }))
+  });
+  const settings = JSON.parse(h.storage.get('ocstatus.settings.v1'));
+  assert.deepEqual(settings.canned_replies, ['Continue', 'Run tests', 'x'.repeat(80)]);
+
+  h.takeSent();
+  h.watch({ canned_req: 1 });
+  const messages = h.takeSent();
+  assert.equal(messages.find((message) => message.canned_begin).canned_count, 3);
+  assert.deepEqual(
+    messages.filter((message) => message.canned_text).map((message) => message.canned_text),
+    ['Continue', 'Run tests', 'x'.repeat(80)]
+  );
+  assert.equal(messages.find((message) => message.canned_end).canned_count, 3);
+});
+
+test('empty canned replies are sent as an empty table', () => {
+  const h = harness();
+  h.handlers.webviewclosed({
+    response: encodeURIComponent(JSON.stringify({ canned_replies: [] }))
+  });
+  h.takeSent();
+  h.watch({ canned_req: 1 });
+  const messages = h.takeSent();
+  assert.ok(messages.some((message) => message.canned_begin));
+  assert.equal(messages.some((message) => message.canned_text), false);
+  assert.equal(messages.find((message) => message.canned_end).canned_count, 0);
+});
+
+test('concurrent detail opens share one one-shot replies read', async () => {
+  const h = harness();
+  delete h.Pebble.readSource;
+  const before = h.subscriptions.filter((entry) => entry.item === 'replies').length;
+
+  h.watch({ detail_req: 1, session_id: 'ses_a' });
+  h.watch({ detail_req: 1, session_id: 'ses_b' });
+  const during = h.subscriptions.filter((entry) => entry.item === 'replies');
+  assert.equal(during.length, before + 1);
+  const oneShot = during[during.length - 1];
+
+  oneShot.onData({
+    instances: [
+      replyRow('ses_a', 'Krtni Project', 'msg_a', 'First reply'),
+      replyRow('ses_b', 'Website changes', 'msg_b', 'Second reply')
+    ]
+  });
+  await new Promise((resolve) => setImmediate(resolve));
+
+  const messages = h.takeSent();
+  assert.equal(
+    messages.filter((message) => message.reply_chunk).map((message) => message.reply_chunk).join(''),
+    'Second reply'
+  );
+});
+
+test('a retired plugin source resubscribes after a delay', () => {
+  const h = harness();
+  const replied = h.subscriptions.filter((entry) => entry.item === 'replies').pop();
+  assert.ok(replied);
+  replied.onError({
+    code: 'UNKNOWN',
+    message: 'OpenCode was updated or removed; subscribe again'
+  });
+  assert.ok(h.subscriptions.length > 0, 'no immediate restart');
+  h.runTimers();
+  assert.ok(h.subscriptions.some((entry) => entry.item === 'replies'), 'subscriptions restored');
 });
 
 test('only-action filter hides read sessions and persists', () => {

@@ -24,8 +24,10 @@ plugin knows about and lets you open them from the watch.
   answers a choice. Aplite keeps the simpler one-line question list.
 - Otherwise the detail screen shows the latest reply text, with scrolling for longer replies. When
   the reply is displayed, the app marks it read on the watch.
-- On a reply detail, Select starts dictation. Running sessions offer **Queue after run** or
-  **Steer active run**; idle sessions send immediately. The plugin's receipt is shown on the watch.
+- On a reply detail, short-press Select opens the canned reply table; long-press Select starts
+  dictation. Running sessions offer **Queue after run** or **Steer active run**; idle sessions send
+  immediately. The plugin's receipt is shown on the watch. Aplite does not include canned replies or
+  dictation.
 
 The watch UI is C. All plugin access is in `src/pkjs/index.js`; the watch only receives a small
 flat session list and one detail at a time over AppMessage.
@@ -42,6 +44,9 @@ Open **OpenCode Status** in the Pebble app and use its settings page (the gear i
 - **Mark read after**: default **Never**. On app load, unread replies older than the chosen interval
   (5/15/30 minutes, 1/2 hours, or 1 day) are marked read automatically. Questions and permission
   requests are never dismissed. This runs only during the app-load check, not as a background task.
+- **Canned replies**: one per line, up to 8, each up to 80 characters. The default list is
+  **Continue**, **Yes**, **No**, and **Run tests**. Short-press Select on a reply to choose one;
+  long-press to dictate.
 
 Settings are stored by the phone-side app and applied the next time the watch app refreshes. The
 settings page is embedded in the phone-side app and opened from the Pebble app; it does not use a
@@ -65,6 +70,10 @@ Reply text is fetched from `opencode/replies` on demand when a session is opened
 focused `opencode/reply` source still refreshes the default or last-sent session every 20 seconds.
 Older sessions outside the monitored set have no reply text; raise **Recent replies** in the plugin
 settings to monitor more sessions.
+
+On-demand reads share one in-flight request, cache their envelope for 10 seconds, and wait 25 seconds
+before timing out, longer than the phone's 20-second plugin request timeout. If a plugin update
+retires the active source subscriptions, the app restarts them with exponential backoff.
 
 ## Permissions
 

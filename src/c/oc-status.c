@@ -50,8 +50,14 @@
 #define DETAIL_PERMISSION_DECISION 6
 #define DETAIL_QUESTION_TEXT 7
 #define DETAIL_ANSWER_TEXT 8
-#define PROMPT_TEXT_MAX 1024
 #define PROMPT_CHUNK_BYTES 100
+#define MAX_CANNED_REPLIES 8
+#define CANNED_TEXT_LEN 96
+#ifdef PBL_PLATFORM_APLITE
+#define PROMPT_TEXT_MAX 320
+#else
+#define PROMPT_TEXT_MAX 1024
+#endif
 
 typedef struct {
   char id[SESSION_ID_LEN];
@@ -80,6 +86,17 @@ static int s_spin_frame;
 static AppTimer *s_spin_timer;
 static AppTimer *s_connect_timer;
 static GFont s_braille_font;
+
+#ifndef PBL_PLATFORM_APLITE
+static Window *s_canned_window;
+static MenuLayer *s_canned_menu;
+static Layer *s_canned_footer;
+static char s_canned_replies[MAX_CANNED_REPLIES][CANNED_TEXT_LEN];
+static int s_canned_count;
+static bool s_canned_loading;
+static int s_canned_request_attempts;
+static AppTimer *s_canned_timer;
+#endif
 
 static Window *s_detail_window;
 static Layer *s_header_bg;
@@ -137,6 +154,12 @@ static int s_prompt_chunks;
 static int s_prompt_next;
 static int s_prompt_phase;
 static uint8_t s_prompt_delivery;
+static void detail_show_send_mode(void);
+static void start_prompt_upload(void);
+static void send_next_prompt_message(void);
+static void open_canned_window(void);
+static void question_marquee_start(void);
+static void question_marquee_stop(void);
 #endif
 static bool s_prompt_uploading;
 static bool s_send_pending;
@@ -144,17 +167,9 @@ static bool s_send_pending;
 static void spinner_tick(void *data);
 static void list_recalc_spinner(void);
 static void detail_error(const char *text);
-#ifndef PBL_PLATFORM_APLITE
-static void detail_show_send_mode(void);
-static void start_prompt_upload(void);
-static void send_next_prompt_message(void);
-#endif
 static void detail_select_click(ClickRecognizerRef recognizer, void *context);
 static void detail_scroll_click_config(void *context);
-#ifndef PBL_PLATFORM_APLITE
-static void question_marquee_start(void);
-static void question_marquee_stop(void);
-#endif
+static void detail_dictation_long_click(ClickRecognizerRef recognizer, void *context);
 
 static const uint8_t BRAILLE_FRAMES[] = {
   0x0b, 0x19, 0x39, 0x38, 0x3c, 0x34, 0x26, 0x27, 0x07, 0x0f,
@@ -479,6 +494,180 @@ static void list_window_unload(Window *window) {
   layer_destroy(s_footer_layer);
   s_footer_layer = NULL;
 }
+
+// ---------------------------------------------------------------- canned replies
+
+#ifndef PBL_PLATFORM_APLITE
+static void canned_footer_update(Layer *layer, GContext *ctx) {
+  GRect bounds = layer_get_bounds(layer);
+  graphics_context_set_fill_color(ctx, GColorWhite);
+  graphics_fill_rect(ctx, bounds, 0, GCornerNone);
+  graphics_context_set_stroke_color(ctx, line_color());
+  graphics_draw_line(ctx, GPoint(0, 0), GPoint(bounds.size.w, 0));
+  graphics_context_set_text_color(ctx, muted_text());
+  const char *text = s_canned_loading ? "Loading canned replies..." :
+                     s_canned_count > 0 ? "Select to send" : "Add canned replies in settings";
+  graphics_draw_text(ctx, text, fonts_get_system_font(FONT_KEY_GOTHIC_14),
+                     GRect(4, 1, bounds.size.w - 8, 16),
+                     GTextOverflowModeTrailingEllipsis, GTextAlignmentCenter, NULL);
+}
+
+static uint16_t canned_get_num_sections(MenuLayer *menu_layer, void *data) {
+  return 1;
+}
+
+static uint16_t canned_get_num_rows(MenuLayer *menu_layer, uint16_t section_index, void *data) {
+  return s_canned_count > 0 ? (uint16_t)s_canned_count : 1;
+}
+
+static int16_t canned_get_cell_height(MenuLayer *menu_layer, MenuIndex *cell_index, void *data) {
+  return LIST_ROW_HEIGHT;
+}
+
+static void canned_draw_empty(GContext *ctx, const Layer *cell_layer) {
+  GRect bounds = layer_get_bounds(cell_layer);
+  graphics_context_set_fill_color(ctx, GColorWhite);
+  graphics_fill_rect(ctx, bounds, 0, GCornerNone);
+  graphics_context_set_text_color(ctx, GColorBlack);
+  graphics_draw_text(ctx, s_canned_loading ? "Loading..." : "No canned replies",
+                     fonts_get_system_font(FONT_KEY_GOTHIC_18_BOLD),
+                     GRect(8, 3, bounds.size.w - 16, 22),
+                     GTextOverflowModeTrailingEllipsis, GTextAlignmentCenter, NULL);
+  graphics_context_set_text_color(ctx, muted_text());
+  graphics_draw_text(ctx, s_canned_loading ? "Waiting for phone" : "Add them in settings",
+                     fonts_get_system_font(FONT_KEY_GOTHIC_14),
+                     GRect(8, 22, bounds.size.w - 16, 16),
+                     GTextOverflowModeTrailingEllipsis, GTextAlignmentCenter, NULL);
+}
+
+static void canned_draw_row(GContext *ctx, const Layer *cell_layer, MenuIndex *cell_index,
+                            void *data) {
+  GRect bounds = layer_get_bounds(cell_layer);
+  if (s_canned_count == 0) {
+    canned_draw_empty(ctx, cell_layer);
+    return;
+  }
+  if (cell_index->row >= (uint16_t)s_canned_count) return;
+
+  bool highlighted = menu_cell_layer_is_highlighted(cell_layer);
+  graphics_context_set_fill_color(ctx, highlighted ? list_highlight() : GColorWhite);
+  graphics_fill_rect(ctx, bounds, 0, GCornerNone);
+  graphics_context_set_text_color(ctx, highlighted ? list_highlight_text() : GColorBlack);
+  int x = PBL_IF_ROUND_ELSE(32, 6);
+  int right = PBL_IF_ROUND_ELSE(28, 6);
+  graphics_draw_text(ctx, s_canned_replies[cell_index->row],
+                     fonts_get_system_font(FONT_KEY_GOTHIC_24_BOLD),
+                     GRect(x, 3, bounds.size.w - x - right, 32),
+                     GTextOverflowModeTrailingEllipsis, GTextAlignmentLeft, NULL);
+  if (!highlighted) {
+    graphics_context_set_stroke_color(ctx, line_color());
+    graphics_draw_line(ctx, GPoint(0, bounds.size.h - 1),
+                       GPoint(bounds.size.w, bounds.size.h - 1));
+  }
+}
+
+static bool request_canned_replies(void) {
+  DictionaryIterator *out;
+  if (app_message_outbox_begin(&out) != APP_MSG_OK) return false;
+  dict_write_uint8(out, MESSAGE_KEY_canned_req, 1);
+  app_message_outbox_send();
+  return true;
+}
+
+static void canned_timeout(void *data) {
+  s_canned_timer = NULL;
+  if (!s_canned_loading) return;
+  s_canned_loading = false;
+  s_canned_count = 0;
+  if (s_canned_menu) menu_layer_reload_data(s_canned_menu);
+  if (s_canned_footer) layer_mark_dirty(s_canned_footer);
+}
+
+static void canned_request_retry(void *data) {
+  s_canned_timer = NULL;
+  if (!s_canned_loading) return;
+  if (s_canned_request_attempts >= 6) {
+    canned_timeout(NULL);
+    return;
+  }
+  s_canned_request_attempts += 1;
+  if (request_canned_replies()) {
+    s_canned_timer = app_timer_register(10000, canned_timeout, NULL);
+  } else {
+    s_canned_timer = app_timer_register(500, canned_request_retry, NULL);
+  }
+}
+
+static void request_canned_with_retry(void) {
+  s_canned_request_attempts = 1;
+  if (request_canned_replies()) {
+    s_canned_timer = app_timer_register(10000, canned_timeout, NULL);
+  } else {
+    s_canned_timer = app_timer_register(500, canned_request_retry, NULL);
+  }
+}
+
+static void canned_select(MenuLayer *menu_layer, MenuIndex *cell_index, void *data) {
+  if (s_canned_count == 0 || cell_index->row >= (uint16_t)s_canned_count) return;
+  if (!s_detail_open || s_detail_mode != DETAIL_REPLY ||
+      s_answer_pending || s_send_pending || s_prompt_uploading) return;
+  copy_clean(s_prompt_text, sizeof(s_prompt_text),
+             s_canned_replies[cell_index->row], true);
+  s_prompt_len = strlen(s_prompt_text);
+  if (!s_prompt_len) return;
+  window_stack_pop(false);
+  if (s_detail_flags & FLAG_RUNNING) {
+    detail_show_send_mode();
+  } else {
+    s_prompt_delivery = 0;
+    start_prompt_upload();
+  }
+}
+
+static void canned_window_load(Window *window) {
+  Layer *root = window_get_root_layer(window);
+  GRect bounds = layer_get_bounds(root);
+  s_canned_menu = menu_layer_create(GRect(0, 0, bounds.size.w, bounds.size.h - FOOTER_HEIGHT));
+  menu_layer_set_callbacks(s_canned_menu, NULL, (MenuLayerCallbacks){
+    .get_num_sections = canned_get_num_sections,
+    .get_num_rows = canned_get_num_rows,
+    .get_cell_height = canned_get_cell_height,
+    .draw_row = canned_draw_row,
+    .select_click = canned_select,
+  });
+  menu_layer_set_normal_colors(s_canned_menu, GColorWhite, GColorBlack);
+  menu_layer_set_highlight_colors(s_canned_menu, list_highlight(), list_highlight_text());
+  menu_layer_set_click_config_onto_window(s_canned_menu, window);
+  layer_add_child(root, menu_layer_get_layer(s_canned_menu));
+
+  s_canned_footer = layer_create(GRect(0, bounds.size.h - FOOTER_HEIGHT,
+                                        bounds.size.w, FOOTER_HEIGHT));
+  layer_set_update_proc(s_canned_footer, canned_footer_update);
+  layer_add_child(root, s_canned_footer);
+}
+
+static void canned_window_unload(Window *window) {
+  if (s_canned_timer) {
+    app_timer_cancel(s_canned_timer);
+    s_canned_timer = NULL;
+  }
+  menu_layer_destroy(s_canned_menu);
+  s_canned_menu = NULL;
+  layer_destroy(s_canned_footer);
+  s_canned_footer = NULL;
+}
+
+static void open_canned_window(void) {
+  if (!s_detail_open || s_detail_mode != DETAIL_REPLY ||
+      s_answer_pending || s_send_pending || s_prompt_uploading) return;
+  if (window_stack_get_top_window() == s_canned_window) return;
+  s_canned_count = 0;
+  s_canned_loading = true;
+  if (s_canned_timer) app_timer_cancel(s_canned_timer);
+  window_stack_push(s_canned_window, true);
+  request_canned_with_retry();
+}
+#endif
 
 // ---------------------------------------------------------------- detail header
 
@@ -822,9 +1011,28 @@ static void detail_question_back_click(ClickRecognizerRef recognizer, void *cont
 
 static void detail_scroll_click_config(void *context) {
   window_single_click_subscribe(BUTTON_ID_SELECT, detail_select_click);
+  // Start dictation after release, so the same press cannot also select a canned row.
+  window_long_click_subscribe(BUTTON_ID_SELECT, 500, NULL, detail_dictation_long_click);
 #ifndef PBL_PLATFORM_APLITE
   if (s_detail_mode == DETAIL_QUESTION_TEXT || s_detail_mode == DETAIL_ANSWER_TEXT) {
     window_single_click_subscribe(BUTTON_ID_BACK, detail_question_back_click);
+  }
+#endif
+}
+
+static void detail_dictation_long_click(ClickRecognizerRef recognizer, void *context) {
+  if (s_detail_mode != DETAIL_REPLY ||
+      s_answer_pending || s_send_pending || s_prompt_uploading) return;
+#ifdef PBL_PLATFORM_APLITE
+  detail_error("Dictation is not available on this watch.");
+#else
+  if (!s_dictation) {
+    detail_error("Dictation is not available on this watch.");
+    return;
+  }
+  DictationSessionStatus status = dictation_session_start(s_dictation);
+  if (status != DictationSessionStatusSuccess) {
+    detail_error("Could not start dictation. Check the phone connection.");
   }
 #endif
 }
@@ -842,17 +1050,10 @@ static void detail_select_click(ClickRecognizerRef recognizer, void *context) {
     return;
   }
   if (s_detail_mode != DETAIL_REPLY) return;
-#ifdef PBL_PLATFORM_APLITE
-  detail_error("Dictation is not available on this watch.");
+#ifndef PBL_PLATFORM_APLITE
+  open_canned_window();
 #else
-  if (!s_dictation) {
-    detail_error("Dictation is not available on this watch.");
-    return;
-  }
-  DictationSessionStatus status = dictation_session_start(s_dictation);
-  if (status != DictationSessionStatusSuccess) {
-    detail_error("Could not start dictation. Check the phone connection.");
-  }
+  detail_error("Canned replies are not available on this watch.");
 #endif
 }
 
@@ -1852,7 +2053,52 @@ static void handle_clear_result(DictionaryIterator *iter) {
   if (s_footer_layer) layer_mark_dirty(s_footer_layer);
 }
 
+#ifndef PBL_PLATFORM_APLITE
+static void handle_canned_begin(DictionaryIterator *iter) {
+  s_canned_count = 0;
+  s_canned_loading = true;
+  if (s_canned_menu) menu_layer_reload_data(s_canned_menu);
+  if (s_canned_footer) layer_mark_dirty(s_canned_footer);
+}
+
+static void handle_canned_reply(DictionaryIterator *iter) {
+  int index = tuple_int(iter, MESSAGE_KEY_canned_index, -1);
+  if (index < 0 || index >= MAX_CANNED_REPLIES) return;
+  copy_clean(s_canned_replies[index], sizeof(s_canned_replies[index]),
+             tuple_string(iter, MESSAGE_KEY_canned_text, ""), true);
+  if (index + 1 > s_canned_count) s_canned_count = index + 1;
+}
+
+static void handle_canned_end(DictionaryIterator *iter) {
+  int count = tuple_int(iter, MESSAGE_KEY_canned_count, s_canned_count);
+  if (count < 0) count = 0;
+  if (count > MAX_CANNED_REPLIES) count = MAX_CANNED_REPLIES;
+  s_canned_count = count;
+  s_canned_loading = false;
+  if (s_canned_timer) {
+    app_timer_cancel(s_canned_timer);
+    s_canned_timer = NULL;
+  }
+  if (s_canned_menu) menu_layer_reload_data(s_canned_menu);
+  if (s_canned_footer) layer_mark_dirty(s_canned_footer);
+}
+#endif
+
 static void inbox_received(DictionaryIterator *iter, void *context) {
+#ifndef PBL_PLATFORM_APLITE
+  if (tuple_int(iter, MESSAGE_KEY_canned_begin, 0)) {
+    handle_canned_begin(iter);
+    return;
+  }
+  if (tuple_present(iter, MESSAGE_KEY_canned_text)) {
+    handle_canned_reply(iter);
+    return;
+  }
+  if (tuple_int(iter, MESSAGE_KEY_canned_end, 0)) {
+    handle_canned_end(iter);
+    return;
+  }
+#endif
   if (tuple_int(iter, MESSAGE_KEY_list_begin, 0)) {
     handle_list_begin(iter);
     return;
@@ -1968,6 +2214,15 @@ static void init(void) {
     .unload = detail_window_unload,
   });
 
+#ifndef PBL_PLATFORM_APLITE
+  s_canned_window = window_create();
+  window_set_background_color(s_canned_window, GColorWhite);
+  window_set_window_handlers(s_canned_window, (WindowHandlers){
+    .load = canned_window_load,
+    .unload = canned_window_unload,
+  });
+#endif
+
   window_stack_push(s_list_window, false);
   app_timer_register(300, send_hello, NULL);
 }
@@ -1977,12 +2232,18 @@ static void deinit(void) {
   if (s_connect_timer) app_timer_cancel(s_connect_timer);
   if (s_result_timer) app_timer_cancel(s_result_timer);
 #ifndef PBL_PLATFORM_APLITE
+  if (s_canned_timer) app_timer_cancel(s_canned_timer);
+#endif
+#ifndef PBL_PLATFORM_APLITE
   question_marquee_stop();
 #endif
 #ifndef PBL_PLATFORM_APLITE
   if (s_dictation) dictation_session_destroy(s_dictation);
 #endif
   if (s_braille_font) fonts_unload_custom_font(s_braille_font);
+#ifndef PBL_PLATFORM_APLITE
+  window_destroy(s_canned_window);
+#endif
   window_destroy(s_detail_window);
   window_destroy(s_list_window);
 }
