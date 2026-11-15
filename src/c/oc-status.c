@@ -5,7 +5,11 @@
 // A braille-style dot cell spins beside work that is running; a solid dot marks anything that
 // needs the user (a question, a permission request, or a finished reply they have not opened).
 
-#include <pebble.h>
+// The animation, visibility, marquee-cache, and capability policy below is plain C so the host
+// test harness can compile and exercise the real code with OC_STATUS_ANIMATION_TEST defined.
+#include <stdbool.h>
+#include <stddef.h>
+#include <stdint.h>
 
 #define MAX_SESSIONS 20
 #define SESSION_ID_LEN 64
@@ -14,6 +18,7 @@
 #define CHOICE_LABEL_LEN 56
 #define QUESTION_ROW_HEIGHT 40
 #define CHOICE_ROW_HEIGHT 40
+#define SPINNER_INTERVAL_MS 80
 #define MARQUEE_INTERVAL_MS 80
 #define MARQUEE_STEP_PX 2
 #define MARQUEE_GAP_PX 24
@@ -29,11 +34,16 @@
 #define REPLIES_BUFFER_SIZE 1856
 #define QUESTION_DESCRIPTION_LEN 384
 #define CHOICE_DESCRIPTION_LEN 160
+#define APP_MESSAGE_INBOX_SIZE 512
+#define APP_MESSAGE_OUTBOX_SIZE 512
 #else
 #define REPLIES_BUFFER_SIZE 4400
 #define QUESTION_DESCRIPTION_LEN 768
 #define CHOICE_DESCRIPTION_LEN 240
+#define APP_MESSAGE_INBOX_SIZE 1024
+#define APP_MESSAGE_OUTBOX_SIZE 1024
 #endif
+#define REPLY_CAPACITY_BYTES (REPLIES_BUFFER_SIZE - 1)
 
 #define FLAG_RUNNING 0x01
 #define FLAG_ATTENTION 0x02
@@ -59,6 +69,156 @@
 #define PROMPT_TEXT_MAX 1024
 #endif
 
+static bool session_shows_spinner(uint8_t flags) {
+  return (flags & FLAG_RUNNING) && !(flags & (FLAG_PERMISSION | FLAG_QUESTION));
+}
+
+typedef enum {
+  OC_SURFACE_NONE = 0,
+  OC_SURFACE_LIST,
+  OC_SURFACE_DETAIL,
+} OcSurface;
+
+typedef struct {
+  bool app_focused;
+  OcSurface surface;
+  bool list_visible_spinner;
+  bool detail_spinner;
+} OcSpinnerState;
+
+static bool oc_spinner_should_run(const OcSpinnerState *state) {
+  if (!state || !state->app_focused) return false;
+  if (state->surface == OC_SURFACE_LIST) return state->list_visible_spinner;
+  if (state->surface == OC_SURFACE_DETAIL) return state->detail_spinner;
+  return false;
+}
+
+typedef enum {
+  OC_TIMER_KEEP = 0,
+  OC_TIMER_START,
+  OC_TIMER_CANCEL,
+} OcTimerAction;
+
+static OcTimerAction oc_spinner_timer_action(const OcSpinnerState *state, bool timer_active) {
+  bool should_run = oc_spinner_should_run(state);
+  if (should_run) return timer_active ? OC_TIMER_KEEP : OC_TIMER_START;
+  return timer_active ? OC_TIMER_CANCEL : OC_TIMER_KEEP;
+}
+
+typedef struct {
+  int first;
+  int last;
+} OcRowRange;
+
+// Rows are laid out from content coordinate zero; scroll_y is signed content translation.
+// A partially visible row counts, because its spinner pixels are already on screen.
+static bool oc_visible_row_range(int row_count, int row_height, int viewport_height,
+                                 int scroll_y, OcRowRange *range) {
+  if (!range) return false;
+  range->first = 0;
+  range->last = -1;
+  if (row_count <= 0 || row_height <= 0 || viewport_height <= 0) return false;
+  int top = -scroll_y;
+  int bottom = viewport_height - 1 - scroll_y;
+  if (bottom < 0 || top >= row_count * row_height) return false;
+  if (top < 0) top = 0;
+  int first = top / row_height;
+  int last = bottom / row_height;
+  if (last >= row_count) last = row_count - 1;
+  if (last < first) return false;
+  range->first = first;
+  range->last = last;
+  return true;
+}
+
+#ifdef OC_STATUS_ANIMATION_TEST
+static bool oc_visible_flags_have_spinner(const uint8_t *flags, int count,
+                                          int row_height, int viewport_height,
+                                          int scroll_y) {
+  OcRowRange range;
+  if (!flags || !oc_visible_row_range(count, row_height, viewport_height, scroll_y, &range)) {
+    return false;
+  }
+  for (int i = range.first; i <= range.last; i++) {
+    if (session_shows_spinner(flags[i])) return true;
+  }
+  return false;
+}
+#endif
+
+#if !defined(PBL_PLATFORM_APLITE) || defined(OC_STATUS_ANIMATION_TEST)
+typedef struct {
+  bool app_focused;
+  bool detail_visible;
+  bool detail_on_top;
+  bool question_mode;
+  bool question_selected;
+} OcMarqueeVisibility;
+
+static bool oc_marquee_should_run(const OcMarqueeVisibility *state) {
+  return state && state->app_focused && state->detail_visible && state->detail_on_top &&
+         state->question_mode && state->question_selected;
+}
+
+typedef struct {
+  bool valid;
+  uint32_t text_version;
+  int bounds_width;
+  int text_width;
+  int visible_width;
+} OcMarqueeMetrics;
+
+static void oc_marquee_metrics_clear(OcMarqueeMetrics *metrics) {
+  if (!metrics) return;
+  metrics->valid = false;
+  metrics->text_version = 0;
+  metrics->bounds_width = 0;
+  metrics->text_width = 0;
+  metrics->visible_width = 0;
+}
+
+static bool oc_marquee_metrics_match(const OcMarqueeMetrics *metrics, uint32_t text_version,
+                                     int bounds_width) {
+  return metrics && metrics->valid && metrics->text_version == text_version &&
+         metrics->bounds_width == bounds_width;
+}
+
+static const OcMarqueeMetrics *oc_marquee_metrics_cached(const OcMarqueeMetrics *metrics,
+                                                          uint32_t text_version,
+                                                          int bounds_width) {
+  return oc_marquee_metrics_match(metrics, text_version, bounds_width) ? metrics : NULL;
+}
+
+static void oc_marquee_metrics_store(OcMarqueeMetrics *metrics, uint32_t text_version,
+                                     int bounds_width, int text_width, int visible_width) {
+  if (!metrics) return;
+  metrics->valid = true;
+  metrics->text_version = text_version;
+  metrics->bounds_width = bounds_width;
+  metrics->text_width = text_width;
+  metrics->visible_width = visible_width;
+}
+
+static int oc_marquee_next_offset(int offset, int text_width, int visible_width) {
+  if (text_width <= visible_width) return 0;
+  int limit = text_width - visible_width + MARQUEE_GAP_PX;
+  int next = offset + MARQUEE_STEP_PX;
+  return next > limit ? 0 : next;
+}
+#endif
+
+static uint32_t oc_reply_capacity(void) {
+  return (uint32_t)REPLY_CAPACITY_BYTES;
+}
+
+static uint32_t oc_inbox_capacity(void) {
+  return (uint32_t)APP_MESSAGE_INBOX_SIZE;
+}
+
+#ifndef OC_STATUS_ANIMATION_TEST
+
+#include <pebble.h>
+
 typedef struct {
   char id[SESSION_ID_LEN];
   char name[SESSION_NAME_LEN];
@@ -80,11 +240,12 @@ static int s_session_count;
 static int s_incoming_count;
 static bool s_list_loading = true;
 static bool s_have_list;
+static bool s_list_visible;
 static char s_status_text[48] = "Connecting...";
-static bool s_has_spinner;
 static int s_spin_frame;
 static AppTimer *s_spin_timer;
 static AppTimer *s_connect_timer;
+static bool s_app_focused = true;
 static GFont s_braille_font;
 
 #ifndef PBL_PLATFORM_APLITE
@@ -114,6 +275,7 @@ static char s_detail_message_id[96];
 static char s_permission_request_id[128];
 static uint8_t s_detail_flags;
 static bool s_detail_open;
+static bool s_detail_visible;
 static bool s_detail_header_single;
 static bool s_answer_pending;
 static int s_detail_mode = DETAIL_REPLY;
@@ -138,8 +300,12 @@ static TextLayer *s_answer_label_text;
 static TextLayer *s_answer_description_text;
 static AppTimer *s_marquee_timer;
 static int s_marquee_offset;
+static uint32_t s_marquee_text_version;
+static OcMarqueeMetrics s_marquee_metrics;
 #endif
 static char s_reply_buffer[REPLIES_BUFFER_SIZE];
+typedef char reply_buffer_capacity_must_match[
+    (sizeof(s_reply_buffer) - 1 == REPLY_CAPACITY_BYTES) ? 1 : -1];
 static size_t s_reply_len;
 static int s_reply_expected;
 static int s_reply_next;
@@ -160,11 +326,17 @@ static void send_next_prompt_message(void);
 static void open_canned_window(void);
 static void question_marquee_start(void);
 static void question_marquee_stop(void);
+static void question_marquee_pause(void);
+static void question_marquee_sync(bool reset);
+static void question_marquee_restart(void);
+static void question_marquee_text_changed(void);
 #endif
 static bool s_prompt_uploading;
 static bool s_send_pending;
 
 static void spinner_tick(void *data);
+static void spinner_sync(void);
+static void spinner_ensure(void);
 static void list_recalc_spinner(void);
 static void detail_error(const char *text);
 static void detail_select_click(ClickRecognizerRef recognizer, void *context);
@@ -211,10 +383,6 @@ static GColor reason_dot_color(uint8_t flags, bool highlighted) {
 #else
   return highlighted ? GColorWhite : attention_color();
 #endif
-}
-
-static bool session_shows_spinner(uint8_t flags) {
-  return (flags & FLAG_RUNNING) && !(flags & (FLAG_PERMISSION | FLAG_QUESTION));
 }
 
 static void draw_reason_dot(GContext *ctx, GPoint center, uint8_t flags, bool highlighted) {
@@ -380,6 +548,9 @@ static void list_draw_row(GContext *ctx, const Layer *cell_layer, MenuIndex *cel
                     GPoint(status_rect.origin.x + status_rect.size.w / 2, bounds.size.h / 2),
                     session->flags, highlighted);
   } else if (session->flags & FLAG_RUNNING) {
+    // MenuLayer only draws rows that are on screen. A row entering during an animated scroll
+    // rearms the timer without redrawing or relayouting from the draw callback.
+    spinner_ensure();
     GRect spinner_rect = GRect(status_rect.origin.x,
                                (bounds.size.h - SPINNER_BOX_HEIGHT) / 2 + SPINNER_NUDGE,
                                status_rect.size.w, SPINNER_BOX_HEIGHT);
@@ -421,6 +592,13 @@ static void request_clear_completed(const char *session_id) {
   app_message_outbox_send();
 }
 
+static void write_protocol_capabilities(DictionaryIterator *out) {
+  // Reply capacity is the usable bytes in s_reply_buffer, not its allocation size. The inbox
+  // size is the value actually passed to app_message_open, so both sides cannot drift.
+  dict_write_uint32(out, MESSAGE_KEY_reply_cap, oc_reply_capacity());
+  dict_write_uint32(out, MESSAGE_KEY_inbox_size, oc_inbox_capacity());
+}
+
 static void list_select(MenuLayer *menu_layer, MenuIndex *cell_index, void *data) {
   if (s_session_count == 0) {
     request_list_refresh();
@@ -454,6 +632,13 @@ static void list_select_long(MenuLayer *menu_layer, MenuIndex *cell_index, void 
   if (s_footer_layer) layer_mark_dirty(s_footer_layer);
 }
 
+static void list_selection_changed(MenuLayer *menu_layer, MenuIndex new_index,
+                                   MenuIndex old_index, void *data) {
+  // The selected row may still be off screen while MenuLayer animates the scroll. Ensure only
+  // starts when the current predicate is true; list_draw_row rearms again as rows enter.
+  spinner_sync();
+}
+
 static void footer_update(Layer *layer, GContext *ctx) {
   GRect bounds = layer_get_bounds(layer);
   graphics_context_set_fill_color(ctx, GColorWhite);
@@ -464,6 +649,16 @@ static void footer_update(Layer *layer, GContext *ctx) {
   graphics_draw_text(ctx, s_status_text, fonts_get_system_font(FONT_KEY_GOTHIC_14),
                      GRect(4, 1, bounds.size.w - 8, 16),
                      GTextOverflowModeTrailingEllipsis, GTextAlignmentCenter, NULL);
+}
+
+static void list_window_appear(Window *window) {
+  s_list_visible = true;
+  spinner_sync();
+}
+
+static void list_window_disappear(Window *window) {
+  s_list_visible = false;
+  spinner_sync();
 }
 
 static void list_window_load(Window *window) {
@@ -477,6 +672,7 @@ static void list_window_load(Window *window) {
     .draw_row = list_draw_row,
     .select_click = list_select,
     .select_long_click = list_select_long,
+    .selection_changed = list_selection_changed,
   });
   menu_layer_set_normal_colors(s_list_menu, GColorWhite, GColorBlack);
   menu_layer_set_highlight_colors(s_list_menu, list_highlight(), list_highlight_text());
@@ -489,6 +685,8 @@ static void list_window_load(Window *window) {
 }
 
 static void list_window_unload(Window *window) {
+  s_list_visible = false;
+  spinner_sync();
   menu_layer_destroy(s_list_menu);
   s_list_menu = NULL;
   layer_destroy(s_footer_layer);
@@ -721,6 +919,7 @@ static void detail_status_update(Layer *layer, GContext *ctx) {
     return;
   }
   if (s_detail_flags & FLAG_RUNNING) {
+    spinner_ensure();
     GRect spinner_rect = GRect(0,
                                (bounds.size.h - SPINNER_BOX_HEIGHT) / 2 + SPINNER_NUDGE,
                                bounds.size.w, SPINNER_BOX_HEIGHT);
@@ -757,9 +956,15 @@ static int question_text_x(void) {
   return PBL_IF_ROUND_ELSE(40, 10);
 }
 
-static int question_text_width(void) {
+static int question_bounds_width(void) {
+  if (!s_detail_window) return 0;
   Layer *root = window_get_root_layer(s_detail_window);
-  return layer_get_bounds(root).size.w - question_text_x() - 8;
+  return root ? layer_get_bounds(root).size.w : 0;
+}
+
+static int question_text_width(void) {
+  int bounds = question_bounds_width();
+  return bounds > 0 ? bounds - question_text_x() - 8 : 0;
 }
 
 static GSize text_size(const char *text, GFont font, int width, bool wrap) {
@@ -778,47 +983,106 @@ static const char *question_row_text(void) {
   return s_question_title[0] ? s_question_title : "Question";
 }
 
+static const OcMarqueeMetrics *question_marquee_metrics(void) {
+  int bounds_width = question_bounds_width();
+  if (!oc_marquee_metrics_match(&s_marquee_metrics, s_marquee_text_version, bounds_width)) {
+    int text_width = bounds_width > 0 ?
+        text_size(question_row_text(), fonts_get_system_font(FONT_KEY_GOTHIC_18),
+                  8192, false).w : 0;
+    oc_marquee_metrics_store(&s_marquee_metrics, s_marquee_text_version, bounds_width,
+                             text_width, question_text_width());
+  }
+  return &s_marquee_metrics;
+}
+
+static bool question_marquee_selected(void) {
+  return s_choice_menu && menu_layer_get_selected_index(s_choice_menu).row == 0;
+}
+
+static bool question_marquee_surface_visible(void) {
+  OcMarqueeVisibility state = {
+    .app_focused = s_app_focused,
+    .detail_visible = s_detail_open && s_detail_visible && s_choice_menu &&
+                      s_detail_mode == DETAIL_QUESTION,
+    .detail_on_top = window_stack_get_top_window() == s_detail_window,
+    .question_mode = s_detail_mode == DETAIL_QUESTION,
+    .question_selected = question_marquee_selected(),
+  };
+  return oc_marquee_should_run(&state);
+}
+
+static void question_marquee_pause(void) {
+  if (s_marquee_timer) {
+    app_timer_cancel(s_marquee_timer);
+    s_marquee_timer = NULL;
+  }
+}
+
 static void question_marquee_tick(void *data) {
   s_marquee_timer = NULL;
-  if (!s_detail_open || !s_choice_menu || s_detail_mode != DETAIL_QUESTION) {
+  if (!question_marquee_surface_visible()) return;
+  if (!question_marquee_selected()) {
     s_marquee_offset = 0;
     return;
   }
-  MenuIndex selected = menu_layer_get_selected_index(s_choice_menu);
-  if (selected.row != 0) {
+  const OcMarqueeMetrics *metrics = oc_marquee_metrics_cached(
+      &s_marquee_metrics, s_marquee_text_version, question_bounds_width());
+  // Measurement/invalidation happens on text, appear, and draw paths, never in this 80ms tick.
+  if (!metrics) return;
+  if (metrics->text_width <= metrics->visible_width) {
     s_marquee_offset = 0;
     return;
   }
-  int width = text_size(question_row_text(), fonts_get_system_font(FONT_KEY_GOTHIC_18),
-                        8192, false).w;
-  int visible = question_text_width();
-  if (width <= visible) {
-    s_marquee_offset = 0;
-    return;
-  }
-  s_marquee_offset += MARQUEE_STEP_PX;
-  if (s_marquee_offset > width - visible + MARQUEE_GAP_PX) s_marquee_offset = 0;
+  s_marquee_offset = oc_marquee_next_offset(s_marquee_offset, metrics->text_width,
+                                            metrics->visible_width);
   layer_mark_dirty(menu_layer_get_layer(s_choice_menu));
   s_marquee_timer = app_timer_register(MARQUEE_INTERVAL_MS, question_marquee_tick, NULL);
 }
 
 static void question_marquee_stop(void) {
-  if (s_marquee_timer) {
-    app_timer_cancel(s_marquee_timer);
-    s_marquee_timer = NULL;
-  }
+  question_marquee_pause();
   s_marquee_offset = 0;
 }
 
+static void question_marquee_sync(bool reset) {
+  if (reset) {
+    question_marquee_pause();
+    s_marquee_offset = 0;
+  }
+  if (!question_marquee_surface_visible() || !question_marquee_selected()) {
+    if (!question_marquee_selected()) s_marquee_offset = 0;
+    question_marquee_pause();
+    return;
+  }
+  const OcMarqueeMetrics *metrics = question_marquee_metrics();
+  if (metrics->text_width <= metrics->visible_width) {
+    s_marquee_offset = 0;
+    question_marquee_pause();
+    return;
+  }
+  int limit = metrics->text_width - metrics->visible_width + MARQUEE_GAP_PX;
+  if (s_marquee_offset > limit) s_marquee_offset = 0;
+  if (!s_marquee_timer) {
+    s_marquee_timer = app_timer_register(MARQUEE_INTERVAL_MS, question_marquee_tick, NULL);
+  }
+}
+
 static void question_marquee_start(void) {
-  question_marquee_stop();
-  if (!s_detail_open || !s_choice_menu || s_detail_mode != DETAIL_QUESTION) return;
-  MenuIndex selected = menu_layer_get_selected_index(s_choice_menu);
-  if (selected.row != 0) return;
-  int width = text_size(question_row_text(), fonts_get_system_font(FONT_KEY_GOTHIC_18),
-                        8192, false).w;
-  if (width <= question_text_width()) return;
-  s_marquee_timer = app_timer_register(MARQUEE_INTERVAL_MS, question_marquee_tick, NULL);
+  question_marquee_sync(false);
+}
+
+static void question_marquee_restart(void) {
+  s_marquee_text_version++;
+  oc_marquee_metrics_clear(&s_marquee_metrics);
+  question_marquee_sync(true);
+}
+
+static void question_marquee_text_changed(void) {
+  // A description can arrive in several chunks. Re-measure now, outside the tick, but keep the
+  // current offset and timer so the line does not jump back to the start for every chunk.
+  s_marquee_text_version++;
+  oc_marquee_metrics_clear(&s_marquee_metrics);
+  question_marquee_sync(false);
 }
 #endif
 
@@ -901,7 +1165,7 @@ static void detail_show_question_mode(void) {
 #ifndef PBL_PLATFORM_APLITE
   detail_hide_answer_layers();
   s_answer_detail_choice = -1;
-  question_marquee_start();
+  question_marquee_restart();
 #endif
 }
 
@@ -1095,6 +1359,8 @@ static int16_t choices_get_cell_height(MenuLayer *menu_layer, MenuIndex *cell_in
 }
 
 static void draw_question_row(GContext *ctx, const Layer *cell_layer, GRect bounds, bool highlighted) {
+  // A bounds change invalidates cached widths; refresh outside the periodic timer callback.
+  question_marquee_sync(false);
   GColor fg = highlighted ? list_highlight_text() : GColorBlack;
   graphics_context_set_text_color(ctx, fg);
   int x = question_text_x();
@@ -1389,6 +1655,22 @@ static void result_pop(void *data) {
   }
 }
 
+static void detail_window_appear(Window *window) {
+  s_detail_visible = true;
+  spinner_sync();
+#ifndef PBL_PLATFORM_APLITE
+  question_marquee_sync(false);
+#endif
+}
+
+static void detail_window_disappear(Window *window) {
+  s_detail_visible = false;
+  spinner_sync();
+#ifndef PBL_PLATFORM_APLITE
+  question_marquee_pause();
+#endif
+}
+
 static void detail_window_load(Window *window) {
   Layer *root = window_get_root_layer(window);
   GRect bounds = layer_get_bounds(root);
@@ -1485,6 +1767,8 @@ static void detail_window_load(Window *window) {
   s_choice_description[0] = '\0';
   s_choice_full_label[0] = '\0';
   s_choice_description_loading = false;
+  s_marquee_text_version = 0;
+  oc_marquee_metrics_clear(&s_marquee_metrics);
 #endif
   s_answer_pending = false;
   s_send_pending = false;
@@ -1582,14 +1866,13 @@ static void request_detail(const char *session_id, const char *name, uint8_t fla
     detail_show_reply_mode();
     layout_detail_header();
   }
-  if (detail_spinner_active() && !s_spin_timer) {
-    s_spin_timer = app_timer_register(80, spinner_tick, NULL);
-  }
+  spinner_sync();
 
   DictionaryIterator *out;
   if (app_message_outbox_begin(&out) == APP_MSG_OK) {
     dict_write_uint8(out, MESSAGE_KEY_detail_req, 1);
     dict_write_cstring(out, MESSAGE_KEY_session_id, s_detail_session);
+    write_protocol_capabilities(out);
     app_message_outbox_send();
   }
 }
@@ -1794,17 +2077,83 @@ static void handle_list_session(DictionaryIterator *iter) {
   if (index + 1 > s_incoming_count) s_incoming_count = index + 1;
 }
 
+static bool list_has_visible_spinner(void) {
+  if (!s_list_menu || s_session_count <= 0) return false;
+  ScrollLayer *scroll = menu_layer_get_scroll_layer(s_list_menu);
+  if (!scroll) return false;
+  GRect bounds = layer_get_bounds(menu_layer_get_layer(s_list_menu));
+  int scroll_y = scroll_layer_get_content_offset(scroll).y;
+  OcRowRange range;
+  if (!oc_visible_row_range(s_session_count, LIST_ROW_HEIGHT, bounds.size.h, scroll_y, &range)) {
+    return false;
+  }
+  for (int i = range.first; i <= range.last; i++) {
+    if (session_shows_spinner(s_sessions[i].flags)) return true;
+  }
+  return false;
+}
+
+static OcSurface spinner_surface(void) {
+  Window *top = window_stack_get_top_window();
+  if (top == s_list_window && s_list_visible) return OC_SURFACE_LIST;
+  if (top == s_detail_window && s_detail_visible) return OC_SURFACE_DETAIL;
+  return OC_SURFACE_NONE;
+}
+
+static OcSpinnerState spinner_state_now(void) {
+  OcSpinnerState state = {
+    .app_focused = s_app_focused,
+    .surface = spinner_surface(),
+    .list_visible_spinner = false,
+    .detail_spinner = false,
+  };
+  if (state.surface == OC_SURFACE_LIST) {
+    state.list_visible_spinner = list_has_visible_spinner();
+  } else if (state.surface == OC_SURFACE_DETAIL) {
+    state.detail_spinner = detail_spinner_active();
+  }
+  return state;
+}
+
+static bool spinner_should_run_now(void) {
+  OcSpinnerState state = spinner_state_now();
+  return oc_spinner_should_run(&state);
+}
+
+static void spinner_ensure(void) {
+  if (s_spin_timer || !spinner_should_run_now()) return;
+  s_spin_timer = app_timer_register(SPINNER_INTERVAL_MS, spinner_tick, NULL);
+}
+
+static void spinner_sync(void) {
+  OcSpinnerState state = spinner_state_now();
+  OcTimerAction action = oc_spinner_timer_action(&state, s_spin_timer != NULL);
+  if (action == OC_TIMER_START) {
+    spinner_ensure();
+  } else if (action == OC_TIMER_CANCEL) {
+    app_timer_cancel(s_spin_timer);
+    s_spin_timer = NULL;
+  }
+}
+
 static void list_recalc_spinner(void) {
-  s_has_spinner = false;
-  for (int i = 0; i < s_session_count; i++) {
-    if (session_shows_spinner(s_sessions[i].flags)) {
-      s_has_spinner = true;
-      break;
-    }
-  }
-  if (s_has_spinner && !s_spin_timer) {
-    s_spin_timer = app_timer_register(80, spinner_tick, NULL);
-  }
+  spinner_sync();
+}
+
+static void app_focus_changed(bool in_focus) {
+  s_app_focused = in_focus;
+  spinner_sync();
+#ifndef PBL_PLATFORM_APLITE
+  question_marquee_sync(false);
+#endif
+}
+
+static void app_focus_will_change(bool in_focus) {
+  if (!in_focus) app_focus_changed(false);
+}
+
+static void app_focus_did_change(bool in_focus) {
+  app_focus_changed(in_focus);
 }
 
 static void handle_list_end(DictionaryIterator *iter) {
@@ -1826,8 +2175,6 @@ static void handle_list_end(DictionaryIterator *iter) {
              s_session_count == 1 ? "" : "s");
   }
 
-  list_recalc_spinner();
-
   bool detail_found = false;
   for (int i = 0; i < s_session_count; i++) {
     if (s_detail_session[0] && strcmp(s_sessions[i].id, s_detail_session) == 0) {
@@ -1839,25 +2186,22 @@ static void handle_list_end(DictionaryIterator *iter) {
   if (!detail_found) s_detail_flags = 0;
   if (s_detail_open) layout_detail_header();
 
-  if ((s_has_spinner || detail_spinner_active()) && !s_spin_timer) {
-    s_spin_timer = app_timer_register(80, spinner_tick, NULL);
-  }
+  list_recalc_spinner();
   if (s_list_menu) menu_layer_reload_data(s_list_menu);
   if (s_footer_layer) layer_mark_dirty(s_footer_layer);
 }
 
 static void spinner_tick(void *data) {
   s_spin_timer = NULL;
-  if (!s_has_spinner && !detail_spinner_active()) return;
+  if (!spinner_should_run_now()) return;
   s_spin_frame = (s_spin_frame + 1) % (int)ARRAY_LENGTH(SPINNER_GLYPHS);
-  if (s_list_menu && window_stack_get_top_window() == s_list_window) {
+  OcSurface surface = spinner_surface();
+  if (surface == OC_SURFACE_LIST && s_list_menu) {
     layer_mark_dirty(menu_layer_get_layer(s_list_menu));
-  }
-  if (s_detail_open && s_detail_status_layer &&
-      window_stack_get_top_window() == s_detail_window) {
+  } else if (surface == OC_SURFACE_DETAIL && s_detail_status_layer) {
     layer_mark_dirty(s_detail_status_layer);
   }
-  s_spin_timer = app_timer_register(80, spinner_tick, NULL);
+  s_spin_timer = app_timer_register(SPINNER_INTERVAL_MS, spinner_tick, NULL);
 }
 
 static void handle_detail(DictionaryIterator *iter) {
@@ -1980,10 +2324,8 @@ static void handle_question_description(DictionaryIterator *iter) {
   if (index != s_question_description_next || !chunk) return;
   append_question_description(chunk);
   s_question_description_next++;
+  question_marquee_text_changed();
   if (s_choice_menu) menu_layer_reload_data(s_choice_menu);
-  if (s_question_description_next >= s_question_description_expected) {
-    question_marquee_start();
-  }
 }
 
 static void handle_choice_detail(DictionaryIterator *iter) {
@@ -2172,6 +2514,7 @@ static void send_hello(void *data) {
   DictionaryIterator *out;
   if (app_message_outbox_begin(&out) == APP_MSG_OK) {
     dict_write_uint8(out, MESSAGE_KEY_req, 2);
+    write_protocol_capabilities(out);
     app_message_outbox_send();
   }
   s_connect_timer = app_timer_register(3000, send_hello, NULL);
@@ -2194,17 +2537,19 @@ static void init(void) {
   app_message_register_outbox_sent(outbox_sent);
   app_message_register_outbox_failed(outbox_failed);
 #endif
-#ifdef PBL_PLATFORM_APLITE
-  app_message_open(512, 512);
-#else
-  app_message_open(1024, 1024);
-#endif
+  app_message_open(APP_MESSAGE_INBOX_SIZE, APP_MESSAGE_OUTBOX_SIZE);
+  app_focus_service_subscribe_handlers((AppFocusHandlers){
+    .will_focus = app_focus_will_change,
+    .did_focus = app_focus_did_change,
+  });
 
   s_list_window = window_create();
   window_set_background_color(s_list_window, GColorWhite);
   window_set_window_handlers(s_list_window, (WindowHandlers){
     .load = list_window_load,
     .unload = list_window_unload,
+    .appear = list_window_appear,
+    .disappear = list_window_disappear,
   });
 
   s_detail_window = window_create();
@@ -2212,6 +2557,8 @@ static void init(void) {
   window_set_window_handlers(s_detail_window, (WindowHandlers){
     .load = detail_window_load,
     .unload = detail_window_unload,
+    .appear = detail_window_appear,
+    .disappear = detail_window_disappear,
   });
 
 #ifndef PBL_PLATFORM_APLITE
@@ -2228,6 +2575,7 @@ static void init(void) {
 }
 
 static void deinit(void) {
+  app_focus_service_unsubscribe();
   if (s_spin_timer) app_timer_cancel(s_spin_timer);
   if (s_connect_timer) app_timer_cancel(s_connect_timer);
   if (s_result_timer) app_timer_cancel(s_result_timer);
@@ -2254,3 +2602,5 @@ int main(void) {
   deinit();
   return 0;
 }
+
+#endif // OC_STATUS_ANIMATION_TEST

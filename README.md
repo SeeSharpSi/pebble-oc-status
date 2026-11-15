@@ -12,7 +12,8 @@ plugin knows about and lets you open them from the watch.
   clears its green dot; on any other row it refreshes the list.
 - The detail header is the session name, with the same spinner or reason-coloured dot on its right
   as the session has in the list.
-- The spinner uses the same ten braille frames and 80 ms interval as the OpenCode CLI.
+- The spinner uses the same ten braille frames and 80 ms interval as the OpenCode CLI. It animates
+  only while the list or detail is visible and focused.
 - Permission requests open first, then questions, then the latest reply. Permission review offers
   **Reject** or **Approve once**; permanent approval is not available.
 - A session with a question opens the question as a list of choices. Select a choice to answer it
@@ -21,7 +22,8 @@ plugin knows about and lets you open them from the watch.
   reveal the full text. Long-press Select opens the full question in a scrollable text view; Back or
   Select returns to the choices. Long-press an answer to open a scrollable answer view with the
   full answer in bold and the answer's gray description from OpenCode underneath. Short Select still
-  answers a choice. Aplite keeps the simpler one-line question list.
+  answers a choice. The question marquee runs only while its screen is visible and focused, and
+  question text measurements are cached. Aplite keeps the simpler one-line question list.
 - Otherwise the detail screen shows the latest reply text, with scrolling for longer replies. When
   the reply is displayed, the app marks it read on the watch.
 - On a reply detail, short-press Select opens the canned reply table; long-press Select starts
@@ -39,6 +41,8 @@ Open **OpenCode Status** in the Pebble app and use its settings page (the gear i
 - **Plugin polling**: **Plugin default** keeps the plugin's own suggested refresh intervals.
   Choosing 10, 30, or 60 seconds makes the app poll the chat list, active sessions, chat status, and
   questions on its own timer and stop its plugin subscriptions. Reply text is still read on demand.
+  An unchanged poll snapshot is not resent to the watch. Launch and manual refresh still force a
+  refresh, and periodic recovery snapshots are still sent.
 - **Only active/action**: hides sessions that are neither running nor asking for attention. Unread
   replies, permission requests, and questions remain visible. An empty list shows **No action**.
 - **Mark read after**: default **Never**. On app load, unread replies older than the chosen interval
@@ -68,13 +72,18 @@ count as attention. Permission and question requests still take priority.
 
 Reply text is fetched from `opencode/replies` on demand when a session is opened, then cached. Every
 open also forces a fresh replies read: cached text appears immediately and is replaced if the session
-has a newer reply. The focused `opencode/reply` source still refreshes the default or last-sent
-session every 20 seconds. Older sessions outside the monitored set have no reply text; raise
-**Recent replies** in the plugin settings to monitor more sessions.
+has a newer reply. A reply already visible on the watch is not resent while it is unchanged. The
+focused `opencode/reply` source still refreshes the default or last-sent session every 20 seconds.
+Older sessions outside the monitored set have no reply text; raise **Recent replies** in the plugin
+settings to monitor more sessions.
 
 On-demand reads share one in-flight request, cache their envelope for 10 seconds, and wait 25 seconds
-before timing out, longer than the phone's 20-second plugin request timeout. If a plugin update
-retires the active source subscriptions, the app restarts them with exponential backoff.
+before timing out, longer than the phone's 20-second plugin request timeout. The 10-second cache is
+specific to the app; plugin 0.9.0 and later keeps its own 5-second and 60-second source caches, and
+older plugins remain supported. Reply text is packed into chunks under the existing 380-byte ceiling,
+using the watch's advertised inbox and total reply buffer capacity, and truncated only at Unicode
+character boundaries. If a plugin update retires the active source subscriptions, the app restarts
+them with exponential backoff.
 
 ## Permissions
 
@@ -117,8 +126,9 @@ pebble build
 pebble install --cloudpebble
 ```
 
-`npm test` runs the phone-side state tests with a fake `Pebble` and `localStorage`; it does not
-need the SDK. `build/oc-status.pbw` is the sideloadable app.
+`npm test` runs phone-side state tests with a fake `Pebble` and `localStorage`, plus a host-compiled
+watch-animation and capability harness using the actual plain-C animation policy. It requires Node.js
+and a C99 compiler named `cc`, but not the Pebble SDK. `build/oc-status.pbw` is the sideloadable app.
 
 ## Credits
 

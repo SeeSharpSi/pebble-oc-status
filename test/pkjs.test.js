@@ -17,7 +17,10 @@ function harness(options = {}) {
   const opened = [];
   const sourceEnvelopes = new Map();
   const timers = new Map();
+  const pendingAcks = [];
+  const deferredReads = [];
   let nextTimer = 0;
+  let now = options.now === undefined ? Date.now() : options.now;
   let replyEnvelope = options.reply || null;
   let repliesEnvelope = options.replies || null;
   let permissionEnvelope = options.permission || null;
@@ -37,6 +40,11 @@ function harness(options = {}) {
       };
     },
     readSource(request) {
+      if (Array.isArray(options.deferReads) && options.deferReads.includes(request.item)) {
+        return new Promise((resolve, reject) => deferredReads.push({
+          item: request.item, request, resolve, reject
+        }));
+      }
       if (request.item === 'reply' && replyEnvelope) return Promise.resolve(replyEnvelope);
       if (request.item === 'replies' && repliesEnvelope) return Promise.resolve(repliesEnvelope);
       if (request.item === 'permission') {
@@ -52,9 +60,10 @@ function harness(options = {}) {
     openURL(url) {
       opened.push(url);
     },
-    sendAppMessage(message, success) {
+    sendAppMessage(message, success, failure) {
       sent.push(message);
-      if (success) success();
+      if (options.deferAcks) pendingAcks.push({ success, failure });
+      else if (success) success();
     },
     addEventListener(name, callback) {
       handlers[name] = callback;
@@ -82,7 +91,7 @@ function harness(options = {}) {
       throw new Error('Unexpected require: ' + name);
     },
     Promise,
-    Date,
+    Date: { now() { return now; } },
     JSON,
     Math,
     Object,
@@ -116,6 +125,26 @@ function harness(options = {}) {
     due.forEach((callback) => callback());
   }
 
+  function advanceTime(ms) { now += ms; }
+
+  function ackNext(error) {
+    const ack = pendingAcks.shift();
+    assert.ok(ack, 'no pending AppMessage acknowledgement');
+    if (error) ack.failure(error);
+    else ack.success();
+  }
+
+  function ackAll() {
+    while (pendingAcks.length) ackNext();
+  }
+
+  function resolveRead(item, envelope, index = 0) {
+    const match = deferredReads.filter((read) => read.item === item)[index];
+    assert.ok(match, `no deferred read for ${item}`);
+    deferredReads.splice(deferredReads.indexOf(match), 1);
+    match.resolve(envelope);
+  }
+
   function sessionMessages(messages) {
     const end = messages.map((message, index) => message.list_end ? index : -1).filter((index) => index >= 0).pop();
     const start = end === undefined ? 0 : messages.reduce((found, message, index) => {
@@ -134,6 +163,7 @@ function harness(options = {}) {
 
   return {
     Pebble, handlers, subscriptions, actions, opened, fire, watch, takeSent, sessionMessages, runTimers,
+    advanceTime, ackNext, ackAll, pendingAcks, deferredReads, resolveRead,
     setReply(envelope) { replyEnvelope = envelope; },
     setReplies(envelope) { repliesEnvelope = envelope; },
     setPermission(envelope) { permissionEnvelope = envelope; },
@@ -206,6 +236,33 @@ function replyRow(sessionId, title, messageId, text, isDefault = false) {
       is_default: { boolean: { value: isDefault } }
     }
   };
+}
+
+function replyFrames(messages) {
+  const start = messages.map((message, index) => message.detail_kind === 1 ? index : -1)
+    .filter((index) => index >= 0).pop();
+  if (start === undefined) return [];
+  const end = messages.findIndex((message, index) => index > start && message.reply_end);
+  return messages.slice(start, end < 0 ? undefined : end + 1);
+}
+
+function dictionaryBytes(message) {
+  return 1 + Object.keys(message).reduce((total, key) => {
+    const value = message[key];
+    return total + 7 + (typeof value === 'string' ? Buffer.byteLength(value, 'utf8') + 1 : 4);
+  }, 0);
+}
+
+function utf8Prefix(text, maxBytes) {
+  let output = '';
+  let bytes = 0;
+  for (const point of text) {
+    const width = Buffer.byteLength(point, 'utf8');
+    if (bytes + width > maxBytes) break;
+    output += point;
+    bytes += width;
+  }
+  return output;
 }
 
 function chatStatusRow(sessionId, title, options = {}) {
@@ -604,6 +661,307 @@ test('opening a cached reply refreshes it from the replies source', async () => 
     .filter((message) => message.reply_chunk)
     .map((message) => message.reply_chunk).join('');
   assert.equal(chunks, 'Newest reply');
+});
+
+test('deferred replies read cannot replace intervening push at older or tied timestamp', async () => {
+  for (const delayedTimestamp of [1700000000, 1800000000]) {
+    const h = harness({ deferReads: ['replies'] });
+    const old = replyRow('ses_a', 'Project', 'msg_z', 'Old snapshot');
+    old.properties.updated.timestamp.value = 1700000000;
+    h.fire('opencode', 'replies', { instances: [old] });
+    h.takeSent();
+    h.watch({ detail_req: 1, session_id: 'ses_a' });
+
+    const pushed = replyRow('ses_a', 'Project', 'msg_a', 'Pushed canonical');
+    pushed.properties.updated.timestamp.value = 1800000000;
+    h.fire('opencode', 'replies', { instances: [pushed] });
+    const delayed = replyRow('ses_a', 'Project', 'msg_z', 'Delayed stale read');
+    delayed.properties.updated.timestamp.value = delayedTimestamp;
+    h.resolveRead('replies', { instances: [delayed] });
+    await new Promise((resolve) => setImmediate(resolve));
+
+    const messages = h.takeSent();
+    const starts = messages.filter((message) => message.detail_kind === 1);
+    assert.equal(starts.length, 2, 'stale forced read did not trigger third transfer');
+    const frames = replyFrames(messages);
+    assert.equal(frames.filter((message) => message.reply_chunk)
+      .map((message) => message.reply_chunk).join(''), 'Pushed canonical');
+  }
+});
+
+test('deferred focused reply read preserves older/tied push and accepts newer timestamp', async () => {
+  for (const delayedUpdated of [1700000000, 1800000000, 1900000000]) {
+    const h = harness({ deferReads: ['replies', 'reply'] });
+    const seed = reply('ses_a', 'msg_z', 'Seed content');
+    seed.properties.updated.timestamp.value = 1700000000;
+    h.fire('opencode', 'reply', { instances: [seed] });
+    h.takeSent();
+    h.watch({ detail_req: 1, session_id: 'ses_a' });
+
+    const repliesRead = replyRow('ses_a', 'Krtni Project', 'msg_z', 'Seed content', true);
+    repliesRead.properties.updated.timestamp.value = 1700000000;
+    h.resolveRead('replies', { instances: [repliesRead] });
+    await new Promise((resolve) => setImmediate(resolve));
+    assert.ok(h.deferredReads.some((read) => read.item === 'reply'), 'focused forced read pending');
+
+    const pushed = reply('ses_a', 'msg_a', 'Pushed content');
+    pushed.properties.updated.timestamp.value = 1800000000;
+    h.fire('opencode', 'reply', { instances: [pushed] });
+    const acceptRead = delayedUpdated > 1800000000;
+    const delayed = reply('ses_a', 'msg_z', acceptRead ? 'Read is newer' : 'Delayed stale reply');
+    delayed.properties.updated.timestamp.value = delayedUpdated;
+    h.resolveRead('reply', { instances: [delayed] });
+    await new Promise((resolve) => setImmediate(resolve));
+
+    const messages = h.takeSent();
+    const frames = replyFrames(messages);
+    const visible = frames.filter((message) => message.reply_chunk)
+      .map((message) => message.reply_chunk).join('');
+    assert.equal(visible, acceptRead ? 'Read is newer' : 'Pushed content');
+    assert.equal(messages.filter((message) => message.detail_kind === 1).length,
+      acceptRead ? 3 : 2,
+      'only canonical visible updates trigger reply transfers');
+  }
+});
+
+test('focused read does not replace equal-second canonical replies message ID', async () => {
+  const h = harness();
+  const canonical = replyRow('ses_a', 'Project', 'msg_new', 'Newest per-session reply', true);
+  canonical.properties.updated.timestamp.value = 1800000000;
+  h.setReplies({ instances: [canonical] });
+  const focused = reply('ses_a', 'msg_old', 'Old focused-source reply');
+  focused.properties.updated.timestamp.value = 1800000000;
+  h.setReply({ instances: [focused] });
+  h.fire('opencode', 'replies', { instances: [canonical] });
+  h.takeSent();
+
+  h.watch({ detail_req: 1, session_id: 'ses_a' });
+  await new Promise((resolve) => setImmediate(resolve));
+  const messages = h.takeSent();
+  const headers = messages.filter((message) => message.detail_kind === 1);
+  assert.equal(headers.length, 1, 'stale secondary read emitted no extra reply transfer');
+  assert.equal(headers[0].detail_message_id, 'msg_new');
+  assert.equal(messages.some((message) => message.detail_message_id === 'msg_old'), false);
+  assert.equal(messages.filter((message) => message.reply_chunk)
+    .map((message) => message.reply_chunk).join(''), 'Newest per-session reply');
+});
+
+test('reply packing honors byte cap, inbox budget, and Unicode codepoint boundaries', async () => {
+  for (const cap of [1855, 4399]) {
+    for (const [label, text] of [
+      ['ASCII', 'a'.repeat(4096)],
+      ['CJK', '界'.repeat(4096)],
+      ['emoji', '\u{1F642}'.repeat(4096)],
+      ['surrogate boundary', 'a'.repeat(379) + '\u{1F642}' + 'b'.repeat(20)]
+    ]) {
+      const h = harness();
+      const inboxSize = cap === 1855 ? 512 : 1024;
+      h.watch({ req: 1, reply_cap: cap, inbox_size: inboxSize });
+      h.setReplies({ instances: [replyRow('ses_a', 'Project', 'msg_a', text)] });
+      h.watch({ detail_req: 1, session_id: 'ses_a' });
+      await new Promise((resolve) => setImmediate(resolve));
+      const frames = replyFrames(h.takeSent());
+      assert.ok(frames.length > 0, `${label}/${cap}: reply header missing`);
+      const chunks = frames.filter((message) => message.reply_chunk).map((message) => message.reply_chunk);
+      const assembled = chunks.join('');
+      const expected = utf8Prefix(text, cap);
+      assert.equal(assembled, expected, `${label}/${cap}: assembled capped prefix`);
+      assert.equal(assembled.indexOf('\uFFFD'), -1, `${label}/${cap}: no replacement character`);
+      assert.ok(chunks.every((chunk) => Buffer.byteLength(chunk, 'utf8') <= 380), `${label}/${cap}: byte limit`);
+      assert.ok(frames.every((message) => dictionaryBytes(message) <= inboxSize), `${label}/${cap}: inbox limit`);
+    }
+  }
+});
+
+test('reply fallback cap is 1855 bytes and non-Aplite 4096 ASCII uses 11 chunks', async () => {
+  const h = harness();
+  h.setReplies({ instances: [replyRow('ses_a', 'Project', 'msg_a', 'x'.repeat(4096))] });
+  h.watch({ detail_req: 1, session_id: 'ses_a' });
+  await new Promise((resolve) => setImmediate(resolve));
+  let frames = replyFrames(h.takeSent());
+  assert.equal(frames.filter((message) => message.reply_chunk).length, 5);
+  assert.equal(frames.filter((message) => message.reply_chunk).map((message) => message.reply_chunk).join('').length, 1855);
+
+  h.watch({ req: 1, reply_cap: 4399, inbox_size: 1024 });
+  h.setReplies({ instances: [replyRow('ses_a', 'Project', 'msg_b', 'x'.repeat(4096))] });
+  h.watch({ detail_req: 1, session_id: 'ses_a' });
+  await new Promise((resolve) => setImmediate(resolve));
+  frames = replyFrames(h.takeSent());
+  assert.equal(frames.filter((message) => message.reply_chunk).length, 11);
+  assert.equal(frames.length, 13, 'header + 11 chunks + end');
+  assert.equal(frames.filter((message) => message.reply_chunk).map((message) => message.reply_chunk).join('').length, 4096);
+});
+
+test('reopening detail forces cached identical reply delivery', () => {
+  const h = harness();
+  h.fire('opencode', 'replies', {
+    instances: [replyRow('ses_a', 'Project', 'msg_a', 'Same visible reply')]
+  });
+  h.takeSent();
+  h.watch({ detail_req: 1, session_id: 'ses_a' });
+  assert.equal(replyFrames(h.takeSent()).filter((message) => message.detail_kind === 1).length, 1);
+  h.watch({ detail_close: 1, session_id: 'ses_a' });
+  h.watch({ detail_req: 1, session_id: 'ses_a' });
+  assert.equal(replyFrames(h.takeSent()).filter((message) => message.detail_kind === 1).length, 1);
+});
+
+test('reply packing preserves maximum supported ID and rejects IDs without safe payload room', async () => {
+  const id = 's'.repeat(63);
+  const h = harness();
+  h.watch({ req: 1, reply_cap: 4399, inbox_size: 512 });
+  h.setReplies({ instances: [replyRow(id, 'Project', 'msg_a', 'x'.repeat(4096))] });
+  h.watch({ detail_req: 1, session_id: id });
+  await new Promise((resolve) => setImmediate(resolve));
+  let frames = replyFrames(h.takeSent());
+  assert.ok(frames.length > 0);
+  assert.ok(frames.every((message) => dictionaryBytes(message) <= 512));
+  assert.ok(frames.every((message) => message.session_id === id));
+  const maxIdChunks = frames.filter((message) => message.reply_chunk);
+  assert.equal(Buffer.byteLength(maxIdChunks[0].reply_chunk, 'utf8'), 380);
+  assert.ok(maxIdChunks.every((message) => Buffer.byteLength(message.reply_chunk, 'utf8') <= 380));
+
+  h.watch({ req: 1, reply_cap: 4399, inbox_size: 1 });
+  const tooLongId = id + 'x';
+  h.setReplies({ instances: [replyRow(tooLongId, 'Project', 'msg_b', 'reply text')] });
+  h.watch({ detail_req: 1, session_id: tooLongId });
+  await new Promise((resolve) => setImmediate(resolve));
+  const sent = h.takeSent();
+  assert.equal(sent.some((message) => message.reply_chunk !== undefined), false);
+  assert.equal(sent.some((message) => message.detail_kind === 3), false,
+    'unsupported ID is not used to route an error to the wrong session');
+});
+
+test('identical focused poll emits no list frames, with five-minute full resync', async () => {
+  const h = harness({ now: 1700000000000 });
+  h.setSource('configured', { instances: [{ properties: { configured: { boolean: { value: true } } } }] });
+  h.setSource('chats', { instances: [chat('ses_a', 'Polled chat')] });
+  h.setSource('active_session', { instances: [session('ses_a', 'Polled chat')] });
+  h.setSource('chat_status', { instances: [] });
+  h.setSource('question', { instances: [] });
+  h.handlers.webviewclosed({ response: encodeURIComponent(JSON.stringify({ poll_rate: 10 })) });
+  await new Promise((resolve) => setImmediate(resolve));
+  h.takeSent();
+
+  h.advanceTime(10000);
+  h.runTimers();
+  await new Promise((resolve) => setImmediate(resolve));
+  assert.equal(h.takeSent().length, 0, 'identical second poll emits zero frames');
+
+  h.advanceTime(290000);
+  h.runTimers();
+  await new Promise((resolve) => setImmediate(resolve));
+  assert.ok(h.takeSent().some((message) => message.list_begin), 'five-minute full list resync');
+});
+
+test('same-length reply corrections and visible metadata changes resend, duplicates do not', () => {
+  const h = harness();
+  h.watch({ detail_req: 1, session_id: 'ses_a' });
+  h.takeSent();
+  h.fire('opencode', 'reply', { instances: [reply('ses_a', 'msg_a', 'First text')] });
+  assert.ok(h.takeSent().some((message) => message.detail_kind === 1));
+  h.fire('opencode', 'reply', { instances: [reply('ses_a', 'msg_a', 'Other text')] });
+  assert.ok(h.takeSent().some((message) => message.detail_kind === 1), 'same-length correction');
+  h.fire('opencode', 'reply', { instances: [reply('ses_a', 'msg_a', 'Other text')] });
+  assert.equal(h.takeSent().some((message) => message.detail_kind === 1), false, 'duplicate suppressed');
+  const titleChange = reply('ses_a', 'msg_a', 'Other text');
+  titleChange.properties.name.longText.text = 'Changed title';
+  h.fire('opencode', 'reply', { instances: [titleChange] });
+  assert.ok(h.takeSent().some((message) => message.detail_kind === 1), 'title change');
+});
+
+test('tail-only growth past reply capacity deduplicates; status and completion still update', () => {
+  const h = harness();
+  h.watch({ req: 1, reply_cap: 1855, inbox_size: 512 });
+  h.watch({ detail_req: 1, session_id: 'ses_a' });
+  h.takeSent();
+  h.fire('opencode', 'reply', { instances: [reply('ses_a', 'msg_a', 'x'.repeat(1855) + 'A')] });
+  assert.ok(h.takeSent().some((message) => message.detail_kind === 1));
+
+  h.fire('opencode', 'reply', { instances: [reply('ses_a', 'msg_a', 'x'.repeat(1855) + 'B')] });
+  assert.equal(h.takeSent().some((message) => message.detail_kind === 1), false,
+    'unrendered tail growth does not retransmit');
+
+  const changed = reply('ses_a', 'msg_a', 'x'.repeat(1855) + 'B', false);
+  changed.properties.status.longText.text = 'Writing';
+  changed.properties.status.shortText.text = 'Writing';
+  h.fire('opencode', 'reply', { instances: [changed] });
+  assert.ok(h.takeSent().some((message) => message.detail_kind === 1),
+    'completion/status changes remain visible updates');
+});
+
+test('older focused reply push keeps newer canonical content and emits no duplicate frames', () => {
+  const h = harness();
+  const newer = replyRow('ses_a', 'Project', 'msg_z', 'Canonical newer reply');
+  newer.properties.updated.timestamp.value = 1800000000;
+  h.fire('opencode', 'replies', { instances: [newer] });
+  h.takeSent();
+  h.watch({ detail_req: 1, session_id: 'ses_a' });
+  assert.equal(replyFrames(h.takeSent()).filter((message) => message.detail_kind === 1).length, 1);
+
+  const olderPush = reply('ses_a', 'msg_a', 'Old focused push');
+  olderPush.properties.updated.timestamp.value = 1700000000;
+  h.fire('opencode', 'reply', { instances: [olderPush] });
+  const afterOldPush = h.takeSent();
+  assert.equal(afterOldPush.some((message) => message.detail_kind === 1), false);
+  assert.equal(h.sessionMessages(afterOldPush).length, 0,
+    'older reply metadata does not force unrelated list changes');
+});
+
+test('older reply snapshots cannot replace newer timestamps or lexical message IDs', () => {
+  const h = harness();
+  const newer = replyRow('ses_a', 'Project', 'msg_z', 'Newer content');
+  newer.properties.updated.timestamp.value = 1800000000;
+  const older = replyRow('ses_a', 'Project', 'msg_a', 'Older content');
+  older.properties.updated.timestamp.value = 1700000000;
+  h.fire('opencode', 'replies', { instances: [newer] });
+  h.fire('opencode', 'replies', { instances: [older] });
+  h.watch({ detail_req: 1, session_id: 'ses_a' });
+  const cached = replyFrames(h.takeSent());
+  assert.equal(cached.filter((message) => message.reply_chunk).map((message) => message.reply_chunk).join(''), 'Newer content');
+});
+
+test('failed reply frame clears dedupe marker for same-content retransmission', () => {
+  const h = harness({ deferAcks: true });
+  h.ackAll();
+  h.takeSent();
+  const value = replyRow('ses_a', 'Project', 'msg_a', 'Retry this reply');
+  h.fire('opencode', 'replies', { instances: [value] });
+  h.ackAll();
+  h.takeSent();
+  h.watch({ detail_req: 1, session_id: 'ses_a' });
+  h.takeSent();
+  h.ackNext(new Error('injected send failure'));
+  h.fire('opencode', 'reply', { instances: [value] });
+  const retry = h.takeSent();
+  h.ackAll();
+  retry.push(...h.takeSent());
+  assert.ok(retry.some((message) => message.detail_kind === 1), 'same content retransmitted');
+});
+
+test('slow AppMessage acknowledgements preserve cached then fresh reply transfer order', async () => {
+  const h = harness({ deferAcks: true });
+  h.setReplies({ instances: [replyRow('ses_a', 'Project', 'msg_old', 'Old cached reply')] });
+  h.fire('opencode', 'replies', { instances: [replyRow('ses_a', 'Project', 'msg_old', 'Old cached reply')] });
+  h.ackAll();
+  h.takeSent();
+
+  h.watch({ detail_req: 1, session_id: 'ses_a' });
+  const cachedHeader = h.pendingAcks[0];
+  assert.ok(cachedHeader, 'cached transfer started');
+  const cachedTransfer = h.takeSent();
+  const sentBeforeFresh = cachedTransfer;
+  assert.equal(sentBeforeFresh[0].detail_kind, 1);
+  h.setReplies({ instances: [replyRow('ses_a', 'Project', 'msg_new', 'Fresh corrected reply')] });
+  h.fire('opencode', 'replies', { instances: [replyRow('ses_a', 'Project', 'msg_new', 'Fresh corrected reply')] });
+  await new Promise((resolve) => setImmediate(resolve));
+  // Fresh transfer queues behind cached one while its first frame is still unacknowledged.
+  h.ackAll();
+  const delivered = cachedTransfer.concat(h.takeSent());
+  const starts = delivered.map((message, index) => message.detail_kind === 1 ? index : -1)
+    .filter((index) => index >= 0);
+  assert.equal(starts.length, 2);
+  const last = replyFrames(delivered.slice(starts[1]));
+  assert.equal(last.filter((message) => message.reply_chunk).map((message) => message.reply_chunk).join(''), 'Fresh corrected reply');
 });
 
 test('question text and answer descriptions are sent to the watch', () => {

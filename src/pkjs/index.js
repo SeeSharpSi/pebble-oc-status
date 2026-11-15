@@ -9,8 +9,19 @@
 var OPENCODE_UUID = '4e2c758f-8a31-4bf2-a6d9-7c40ec9b5173';
 var MAX_SESSIONS = 20;
 var MAX_CHOICES = 24;
-var REPLY_CHUNK_SIZE = 150;
+var REPLY_CHUNK_SIZE = 380;
 var REPLY_CHUNK_BYTES = 380;
+var REPLY_CAP_DEFAULT = 1855;
+var REPLY_CAP_MIN = 1855;
+var REPLY_CAP_MAX = 4399;
+var INBOX_SIZE_DEFAULT = 512;
+var INBOX_SIZE_MIN = 512;
+var INBOX_SIZE_MAX = 1024;
+var REPLY_CHUNK_OVERHEAD_BYTES = 1 + (3 * 7) + 1 + 4 + 1;
+var REPLY_MIN_PAYLOAD_BYTES = 1;
+var MAX_REPLY_SESSION_ID_BYTES = 63;
+var MAX_REPLY_MESSAGE_ID_BYTES = 95;
+var POLL_FULL_RESYNC_MS = 5 * 60 * 1000;
 var KNOWN_LIMIT = 40;
 var KNOWN_MAX_AGE_SEC = 12 * 60 * 60;
 var SOURCE_READ_TIMEOUT_MS = 25000;
@@ -49,6 +60,8 @@ var state = {
   questions: {},
   reply: null,
   replies: {},
+  replyRevision: 0,
+  replyUpdateRevisions: {},
   chatStatus: {},
   permissions: {},
   promptUpload: null,
@@ -75,6 +88,9 @@ var state = {
   resubscribeTimer: null,
   resubscribeAttempts: 0,
   listSignature: '',
+  lastListForceAt: null,
+  replyCap: REPLY_CAP_DEFAULT,
+  inboxSize: INBOX_SIZE_DEFAULT,
   detailSession: '',
   detailKind: '',
   flow: null,
@@ -186,6 +202,85 @@ function unicodeChunks(text, maxBytes, maxChars) {
   }
   if (start < text.length) out.push(text.slice(start));
   return out;
+}
+
+function utf8Width(code) {
+  return code <= 0x7f ? 1 : code <= 0x7ff ? 2 : code <= 0xffff ? 3 : 4;
+}
+
+function utf8ByteLength(text) {
+  var bytes = 0;
+  var value = typeof text === 'string' ? text : '';
+  for (var i = 0; i < value.length;) {
+    var code = value.codePointAt(i);
+    bytes += utf8Width(code);
+    i += code > 0xffff ? 2 : 1;
+  }
+  return bytes;
+}
+
+function truncateUtf8(text, maxBytes) {
+  if (!text || maxBytes <= 0) return '';
+  if (utf8ByteLength(text) <= maxBytes) return text;
+  var bytes = 0;
+  var end = 0;
+  while (end < text.length) {
+    var code = text.codePointAt(end);
+    var width = utf8Width(code);
+    if (bytes + width > maxBytes) break;
+    bytes += width;
+    end += code > 0xffff ? 2 : 1;
+  }
+  return text.slice(0, end);
+}
+
+// Pebble AppMessage dictionary framing is a one-byte dictionary header, a seven-byte tuple
+// header per key, a NUL-terminated UTF-8 string value, or a four-byte integer value. This
+// deliberately counts every number as four bytes and every string with its NUL.
+function dictionaryBytes(dict) {
+  var bytes = 1;
+  Object.keys(dict || {}).forEach(function (key) {
+    bytes += 7;
+    var value = dict[key];
+    bytes += typeof value === 'string' ? utf8ByteLength(value) + 1 : 4;
+  });
+  return bytes;
+}
+
+function frameFitsInbox(dict) {
+  return dictionaryBytes(dict) <= state.inboxSize;
+}
+
+function normalizeCapability(value, fallback, min, max) {
+  var number = Number(value);
+  if (!isFinite(number) || number <= 0) return fallback;
+  number = Math.floor(number);
+  if (number < min) number = min;
+  return number > max ? max : number;
+}
+
+function applyCapabilities(payload) {
+  if (!payload) return;
+  var changed = false;
+  if (payload.reply_cap !== undefined) {
+    var replyCap = normalizeCapability(payload.reply_cap, state.replyCap,
+      REPLY_CAP_MIN, REPLY_CAP_MAX);
+    if (replyCap !== state.replyCap) {
+      state.replyCap = replyCap;
+      changed = true;
+    }
+  }
+  if (payload.inbox_size !== undefined) {
+    var inboxSize = normalizeCapability(payload.inbox_size, state.inboxSize,
+      INBOX_SIZE_MIN, INBOX_SIZE_MAX);
+    if (inboxSize !== state.inboxSize) {
+      state.inboxSize = inboxSize;
+      changed = true;
+    }
+  }
+  // A new capability announcement can make a reply that was rejected or packed differently
+  // deliverable again. Forget the last delivery marker so the next update can be attempted.
+  if (changed) state.lastReplyKey = '';
 }
 
 function pluginInstalled() {
@@ -329,6 +424,17 @@ function isDetailMessage(dict) {
             dict.question_end !== undefined);
 }
 
+function isReplyFrame(dict) {
+  return !!(dict && (dict.detail_kind === 1 || dict.reply_chunk !== undefined ||
+                     dict.reply_end !== undefined));
+}
+
+function noteSendFailure(message) {
+  // A dropped reply frame must not leave the content dedupe marker suppressing the same
+  // reply forever. Forget the marker so a later source update or reopen can retransmit.
+  if (isReplyFrame(message)) state.lastReplyKey = '';
+}
+
 function dropQueuedDetail() {
   sendQueue = sendQueue.filter(function (message) { return !isDetailMessage(message); });
 }
@@ -357,11 +463,13 @@ function pump() {
       pump();
     }, function (error) {
       sending = false;
+      noteSendFailure(message);
       log('send failed: ' + JSON.stringify(error));
       setTimeout(pump, 250);
     });
   } catch (e) {
     sending = false;
+    noteSendFailure(message);
     log('send threw: ' + e);
     setTimeout(pump, 250);
   }
@@ -591,11 +699,14 @@ function listSignature(sessions) {
     signature.push([session.id, session.name, session.flags].join('\u0001'));
   });
   return signature.join('\u0002') + '\u0003' + statusText();
-}function sendList(force) {
+}
+
+function sendList(force) {
   var sessions = mergedSessions();
   var signature = listSignature(sessions);
   if (!force && signature === state.listSignature) return;
   state.listSignature = signature;
+  if (force) state.lastListForceAt = Date.now();
 
   var messages = [{ list_begin: 1, count: sessions.length }];
   sessions.forEach(function (session, index) {
@@ -862,17 +973,55 @@ function mergeReplyEntry(base, update) {
 }
 
 function replyEntryFor(sessionId) {
-  var mapped = state.replies[sessionId] || null;
-  var focused = state.reply && state.reply.sessionId === sessionId ? state.reply : null;
-  if (focused && (!mapped || focused.updated >= mapped.updated)) {
-    return mergeReplyEntry(mapped, focused);
-  }
-  return mapped;
+  return knownCanonicalReply(sessionId);
 }
 
 function replyEntryKey(entry) {
-  return entry.sessionId + '|' + entry.messageId + '|' +
-         (entry.complete ? '1' : '0') + '|' + (entry.text ? entry.text.length : 0);
+  return JSON.stringify([
+    entry.sessionId,
+    entry.messageId,
+    entry.complete ? '1' : '0',
+    entry.status || '',
+    cleanName(entry.title || nameFor(entry.sessionId)),
+    truncateUtf8(entry.text || '', state.replyCap)
+  ]);
+}
+
+function replySnapshotKey(entry) {
+  if (!entry) return '';
+  return JSON.stringify([
+    entry.sessionId, entry.messageId, entry.complete ? 1 : 0, entry.status || '',
+    entry.title || '', entry.text || '', entry.updated || 0, entry.hasText ? 1 : 0,
+    entry.isDefault ? 1 : 0
+  ]);
+}
+
+// Older source snapshots must not roll back a newer known entry. On equal timestamps the
+// incoming snapshot wins unless caller has a revision proving it was already stale in flight.
+function mergeReplySnapshot(existing, incoming) {
+  if (!existing) return incoming;
+  if (!incoming) return existing;
+  var existingUpdated = existing.updated || 0;
+  var incomingUpdated = incoming.updated || 0;
+  if (incomingUpdated < existingUpdated) return mergeReplyEntry(incoming, existing);
+  return mergeReplyEntry(existing, incoming);
+}
+
+function recordReplyCanonical(sessionId, previous, canonical) {
+  if (replySnapshotKey(previous) === replySnapshotKey(canonical)) return;
+  state.replyRevision += 1;
+  state.replyUpdateRevisions[sessionId] = state.replyRevision;
+}
+
+function knownCanonicalReply(sessionId) {
+  var mapped = state.replies[sessionId] || null;
+  var focused = state.reply && state.reply.sessionId === sessionId ? state.reply : null;
+  if (!focused) return mapped;
+  if (!mapped) return focused;
+  if (focused.updated > mapped.updated) return mergeReplyEntry(mapped, focused);
+  if (focused.updated < mapped.updated) return mapped;
+  if (!mapped.hasText && focused.hasText) return mergeReplyEntry(mapped, focused);
+  return mergeReplyEntry(focused, mapped);
 }
 
 function markReplyEntryAttention(entry) {
@@ -892,7 +1041,7 @@ function maybeUpdateOpenReply(entry) {
   sendReplyDetail(entry.sessionId);
 }
 
-function onReplies(envelope) {
+function onReplies(envelope, readRevision) {
   state.errors.replies = null;
   var map = {};
   // Keep cached entries when a refresh omits a session. The source can be empty while the plugin
@@ -906,12 +1055,24 @@ function onReplies(envelope) {
     var sessionId = propText(properties.session_id);
     if (!sessionId) return;
     var entry = replyEntryFromProperties(sessionId, properties, '');
+    var previous = knownCanonicalReply(sessionId);
+    // An intervening push makes a same/older forced-read snapshot stale. A strictly newer
+    // source timestamp remains authoritative, regardless of message ID ordering.
+    if (readRevision !== undefined &&
+        (state.replyUpdateRevisions[sessionId] || 0) > readRevision && previous &&
+        entry.updated <= (previous.updated || 0)) return;
+    // Merge a still-newer focused snapshot, but do not let an old focused entry win a tie
+    // against this fresh replies row.
     if (state.reply && state.reply.sessionId === sessionId &&
-        state.reply.updated >= entry.updated) {
+        (state.reply.updated > entry.updated ||
+         (state.reply.updated === entry.updated && !entry.hasText && state.reply.hasText))) {
       entry = mergeReplyEntry(entry, state.reply);
     }
-    map[sessionId] = entry;
-    rememberSession(sessionId, entry.title, entry.updated);
+    var canonical = mergeReplySnapshot(previous, entry);
+    map[sessionId] = canonical;
+    if (state.reply && state.reply.sessionId === sessionId) state.reply = canonical;
+    recordReplyCanonical(sessionId, previous, canonical);
+    rememberSession(sessionId, canonical.title, canonical.updated);
   });
   if (state.reply && !map[state.reply.sessionId]) {
     map[state.reply.sessionId] = state.reply;
@@ -922,19 +1083,38 @@ function onReplies(envelope) {
   rebuild();
 }
 
-function applyReply(envelope, fromDetail) {
+function applyReply(envelope, fromDetail, readRevision, expectedSessionId) {
   state.errors.reply = null;
   var instance = envelope && envelope.instances && envelope.instances[0];
   if (!instance) {
+    if (readRevision !== undefined && expectedSessionId &&
+        (state.replyUpdateRevisions[expectedSessionId] || 0) > readRevision) return;
     state.reply = null;
     return;
   }
   var properties = instance.properties || {};
   var sessionId = propText(properties.session_id);
   var entry = replyEntryFromProperties(sessionId, properties, '');
-  entry.isDefault = !!(state.replies[sessionId] && state.replies[sessionId].isDefault);
+  var previous = knownCanonicalReply(sessionId);
+  // The focused reply source is secondary to the per-session replies snapshot. Its read may
+  // finish after that snapshot yet return a different message from the same timestamp second.
+  // Without a newer timestamp, keep canonical replies-source content; same-ID corrections
+  // remain valid, and ordinary focused pushes can still advance on equal timestamps.
+  if (fromDetail && previous && previous.hasText && entry.messageId !== previous.messageId &&
+      entry.updated <= (previous.updated || 0)) {
+    entry = previous;
+  }
+  if (readRevision !== undefined &&
+      (state.replyUpdateRevisions[sessionId] || 0) > readRevision && previous &&
+      entry.updated <= (previous.updated || 0)) {
+    entry = previous;
+  } else {
+    entry.isDefault = !!(previous && previous.isDefault);
+    entry = mergeReplySnapshot(previous, entry);
+  }
   state.reply = entry;
-  state.replies[sessionId] = mergeReplyEntry(state.replies[sessionId], entry);
+  state.replies[sessionId] = entry;
+  recordReplyCanonical(sessionId, previous, entry);
   rememberSession(sessionId, entry.title, entry.updated);
   markReplyEntryAttention(entry);
   if (!fromDetail) maybeUpdateOpenReply(entry);
@@ -951,13 +1131,125 @@ function noReplyMessage(sessionId) {
 
 function sendMessageDetail(sessionId, title, status, text, kind) {
   state.detailKind = kind || 'message';
-  enqueue({
+  if (utf8ByteLength(sessionId) > MAX_REPLY_SESSION_ID_BYTES) {
+    log('detail message cannot be routed: unsupported session ID length');
+    return false;
+  }
+  var message = {
     detail_kind: 3,
     session_id: sessionId,
     detail_title: cleanName(title || nameFor(sessionId)),
     detail_status: status || '',
     detail_text: text
-  });
+  };
+  if (frameFitsInbox(message)) {
+    enqueue(message);
+    return true;
+  }
+  // An unusual session ID or a tiny advertised inbox can make the full text frame
+  // impossible. Keep the routing ID intact and send only what fits, or send nothing.
+  var minimal = { detail_kind: 3, session_id: sessionId };
+  if (!frameFitsInbox(minimal)) {
+    log('detail message did not fit the watch inbox for ' + sessionId);
+    return false;
+  }
+  var textRoom = state.inboxSize - dictionaryBytes(minimal) - 7 - 1;
+  if (textRoom > 0) {
+    minimal.detail_text = truncateUtf8(text || '', textRoom);
+    if (frameFitsInbox(minimal)) {
+      enqueue(minimal);
+      return true;
+    }
+  }
+  enqueue(minimal);
+  return true;
+}
+
+function replyChunkTextBudget(sessionId) {
+  return state.inboxSize - REPLY_CHUNK_OVERHEAD_BYTES - utf8ByteLength(sessionId);
+}
+
+function buildReplyPlan(reply) {
+  var sessionId = reply.sessionId || '';
+  if (!sessionId) return { error: 'This reply has no session to route to.' };
+
+  var sessionIdBytes = utf8ByteLength(sessionId);
+  if (sessionIdBytes > MAX_REPLY_SESSION_ID_BYTES) {
+    return { error: 'This session ID is too long for the watch.' };
+  }
+  var messageId = reply.messageId || '';
+  if (utf8ByteLength(messageId) > MAX_REPLY_MESSAGE_ID_BYTES) {
+    return { error: 'This reply message ID is too long for the watch.' };
+  }
+
+  var textBudget = replyChunkTextBudget(sessionId);
+  if (textBudget < REPLY_MIN_PAYLOAD_BYTES) {
+    return { error: 'This session ID leaves no room for a reply on the watch.' };
+  }
+
+  // The watch keeps reply_cap bytes in its reply buffer. Never send a tail it would discard.
+  var cappedText = truncateUtf8(reply.text || '', state.replyCap);
+  if (!cappedText) return { error: 'This reply is too long for the watch.' };
+
+  var maxBytes = Math.min(REPLY_CHUNK_BYTES, textBudget);
+  var chunks = unicodeChunks(cappedText, maxBytes, REPLY_CHUNK_SIZE);
+  var header = {
+    detail_kind: 1,
+    session_id: sessionId,
+    detail_title: cleanName(reply.title || nameFor(sessionId)),
+    detail_status: reply.status || '',
+    detail_message_id: messageId,
+    reply_count: chunks.length
+  };
+  if (!frameFitsInbox(header)) {
+    return { error: 'This reply is too large for the watch inbox.' };
+  }
+  var end = { session_id: sessionId, reply_end: 1 };
+  if (!frameFitsInbox(end)) {
+    return { error: 'This session ID leaves no room for the watch reply end.' };
+  }
+  for (var i = 0; i < chunks.length; i++) {
+    var frame = { session_id: sessionId, reply_index: i, reply_chunk: chunks[i] };
+    if (dictionaryBytes(frame) > state.inboxSize) {
+      return { error: 'This reply chunk does not fit the watch inbox.' };
+    }
+  }
+  return { header: header, chunks: chunks, end: end, text: cappedText };
+}
+
+function sendReplyUnavailable(sessionId, text) {
+  if (utf8ByteLength(sessionId) > MAX_REPLY_SESSION_ID_BYTES) {
+    log('reply error cannot be routed: unsupported session ID length');
+    return false;
+  }
+  state.detailKind = 'reply';
+  var notice = text || 'This reply cannot be shown on the watch.';
+  var full = {
+    detail_kind: 3,
+    session_id: sessionId,
+    detail_title: 'Reply unavailable',
+    detail_status: 'Reply',
+    detail_text: notice
+  };
+  if (frameFitsInbox(full)) {
+    enqueue(full);
+    return true;
+  }
+  var minimal = { detail_kind: 3, session_id: sessionId };
+  var textRoom = state.inboxSize - dictionaryBytes(minimal) - 7 - 1;
+  if (textRoom > 0) {
+    minimal.detail_text = truncateUtf8(notice, textRoom);
+    if (frameFitsInbox(minimal)) {
+      enqueue(minimal);
+      return true;
+    }
+  }
+  if (frameFitsInbox(minimal)) {
+    enqueue(minimal);
+    return true;
+  }
+  log('reply error did not fit the watch inbox for ' + sessionId);
+  return false;
 }
 
 function sendReplyDetail(sessionId) {
@@ -968,20 +1260,16 @@ function sendReplyDetail(sessionId) {
     return;
   }
   state.detailKind = 'reply';
-  var text = reply.text || '';
-  var chunks = unicodeChunks(text, REPLY_CHUNK_BYTES, REPLY_CHUNK_SIZE);
-  enqueue({
-    detail_kind: 1,
-    session_id: sessionId,
-    detail_title: reply.title || nameFor(sessionId),
-    detail_status: reply.status || '',
-    detail_message_id: reply.messageId || '',
-    reply_count: chunks.length
-  });
-  chunks.forEach(function (chunk, index) {
+  var plan = buildReplyPlan(reply);
+  if (plan.error) {
+    sendReplyUnavailable(sessionId, plan.error);
+    return;
+  }
+  enqueue(plan.header);
+  plan.chunks.forEach(function (chunk, index) {
     enqueue({ session_id: sessionId, reply_index: index, reply_chunk: chunk });
   });
-  enqueue({ session_id: sessionId, reply_end: 1 });
+  enqueue(plan.end);
   state.lastReplyKey = replyEntryKey(reply);
 }
 
@@ -995,12 +1283,15 @@ function waitingText(sessionId) {
 }
 
 function refreshFocusedReply(sessionId, sendFallback) {
+  var readRevision = state.replyRevision;
   readSourceOnce('opencode', 'reply', { maxAgeMs: 0 }).then(function (envelope) {
-    applyReply(envelope, true);
+    applyReply(envelope, true, readRevision, sessionId);
     if (state.detailSession !== sessionId || state.detailKind === 'question') return;
     var entry = replyEntryFor(sessionId);
     if (entry && entry.hasText) {
-      sendReplyDetail(sessionId);
+      // The replies read above may already have delivered this exact content. Only replace the
+      // open detail when the visible reply actually changed.
+      maybeUpdateOpenReply(entry);
     } else if (sendFallback) {
       sendMessageDetail(sessionId, nameFor(sessionId),
         entry && entry.status ? entry.status : 'No reply', noReplyMessage(sessionId), 'reply');
@@ -1034,8 +1325,9 @@ function refreshReplyForDetail(sessionId) {
 
   // The replies subscription only refreshes every 60 seconds. Never trust the cached entry alone:
   // a session that just finished a reply would otherwise keep showing the app-open snapshot.
+  var replyRevision = state.replyRevision;
   readSourceOnce('opencode', 'replies', { maxAgeMs: 0 }).then(function (envelope) {
-    onReplies(envelope);
+    onReplies(envelope, replyRevision);
     if (state.detailSession !== sessionId || state.detailKind !== 'reply') return;
     var fresh = replyEntryFor(sessionId);
     var focused = !!(fresh && (fresh.isDefault ||
@@ -1682,7 +1974,14 @@ function pollSources() {
   Promise.all(reads).then(function () {
     if (state.pollGeneration !== generation) return;
     state.polling = false;
-    rebuild(true);
+    // A regular poll that changes nothing stays silent. A bounded heartbeat still sends a full
+    // list so a watch that dropped a frame recovers without waiting for the next real change.
+    if (state.lastListForceAt === null ||
+        Date.now() - state.lastListForceAt >= POLL_FULL_RESYNC_MS) {
+      rebuild(true);
+    } else {
+      rebuild();
+    }
     schedulePoll(generation);
   });
 }
@@ -1883,6 +2182,8 @@ function finishPromptUpload() {
 
 function handleWatchMessage(payload) {
   if (!payload) return;
+  // The watch advertises its reply buffer and inbox before any payload that depends on them.
+  applyCapabilities(payload);
   if (payload.req) {
     if (Number(payload.req) === 2) {
       state.autoReadChecked = false;
