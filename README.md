@@ -45,6 +45,15 @@ Open **OpenCode Status** in the Pebble app and use its settings page (the gear i
   refresh, and periodic recovery snapshots are still sent.
 - **Only active/action**: hides sessions that are neither running nor asking for attention. Unread
   replies, permission requests, and questions remain visible. An empty list shows **No action**.
+- **Subagents**: **Show** (default) displays subagents as separate rows. **Number** hides child rows
+  and counts unique active descendants, including nested descendants under a top-level root, before
+  the 20-row watch limit; the count appears beside the parent indicator. An idle parent with active
+  children still shows the count and spinner; the parent's run state and message-delivery behavior
+  remain unchanged. **Hide** hides child rows and counts. **Number** and **Hide** hide subagent
+  questions and permission requests from the watch list; **Show** does not. These requests are not
+  forwarded to the parent; respond on the phone or computer. **Number** requires an updated OpenCode
+  plugin that exposes parent and root session IDs. **Show** and **Hide** work with older plugins.
+  Message delivery still targets the actual session.
 - **Mark read after**: default **Never**. On app load, unread replies older than the chosen interval
   (5/15/30 minutes, 1/2 hours, or 1 day) are marked read automatically. Questions and permission
   requests are never dismissed. This runs only during the app-load check, not as a background task.

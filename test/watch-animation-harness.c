@@ -3,8 +3,13 @@
 
 #include <assert.h>
 #include <stdio.h>
+#include <string.h>
 
 static void test_spinner_transitions(void) {
+  assert(session_shows_spinner(FLAG_SUBAGENTS_RUNNING));
+  assert(!session_shows_spinner(FLAG_SUBAGENTS_RUNNING | FLAG_PERMISSION));
+  assert(!session_shows_spinner(FLAG_SUBAGENTS_RUNNING | FLAG_QUESTION));
+  assert(session_shows_spinner(FLAG_RUNNING));
   OcSpinnerState state = { true, OC_SURFACE_LIST, true, false };
   assert(oc_spinner_timer_action(&state, false) == OC_TIMER_START);
   assert(oc_spinner_timer_action(&state, true) == OC_TIMER_KEEP);
@@ -29,7 +34,7 @@ static void test_spinner_transitions(void) {
 }
 
 static void test_visible_ranges_and_flags(void) {
-  uint8_t flags[] = { 0, FLAG_RUNNING, 0, FLAG_RUNNING, 0, 0, FLAG_RUNNING };
+  uint8_t flags[] = { 0, FLAG_RUNNING, 0, FLAG_SUBAGENTS_RUNNING, 0, 0, FLAG_RUNNING };
   OcRowRange range;
 
   // Negative translation exposes rows below top; partially clipped boundary rows count.
@@ -106,11 +111,44 @@ static void test_capability_values(void) {
 #endif
 }
 
+static void test_subagent_count_and_layout(void) {
+  char text[4];
+  assert(oc_clamp_subagent_count(-7) == 0);
+  assert(oc_clamp_subagent_count(0) == 0);
+  assert(oc_clamp_subagent_count(1) == 1);
+  assert(oc_clamp_subagent_count(255) == 255);
+  assert(oc_clamp_subagent_count(256) == 255);
+
+  uint8_t reused_row_count = 3;
+  reused_row_count = oc_subagent_count_value(0); // tuple_int fallback for absent key
+  assert(reused_row_count == 0); // missing optional key resets reused row
+  reused_row_count = oc_subagent_count_value(301);
+  assert(reused_row_count == 255);
+
+  oc_format_group_count(0, text);
+  assert(text[0] == '\0');
+  oc_format_group_count(1, text);
+  assert(strcmp(text, "1") == 0);
+  oc_format_group_count(23, text);
+  assert(strcmp(text, "23") == 0);
+  oc_format_group_count(255, text);
+  assert(strcmp(text, "255") == 0);
+
+  const int icon_x = 100;
+  assert(oc_group_count_slot_width(0) == 0);
+  assert(oc_group_count_x(0, icon_x) == icon_x);
+  assert(oc_group_count_slot_width(1) == GROUP_COUNT_WIDTH + GROUP_COUNT_GAP);
+  assert(oc_group_count_slot_width(3) == GROUP_COUNT_WIDTH + GROUP_COUNT_GAP);
+  assert(oc_group_count_x(1, icon_x) + GROUP_COUNT_WIDTH + GROUP_COUNT_GAP == icon_x);
+  assert(oc_group_count_x(3, icon_x) + GROUP_COUNT_WIDTH + GROUP_COUNT_GAP == icon_x);
+}
+
 int main(void) {
   test_spinner_transitions();
   test_visible_ranges_and_flags();
   test_marquee_cache_and_visibility();
   test_capability_values();
+  test_subagent_count_and_layout();
   puts("watch animation harness passed");
   return 0;
 }

@@ -36,6 +36,7 @@ var FLAG_QUESTION = 0x04;
 var FLAG_UNVIEWED = 0x08;
 var FLAG_SUBAGENT = 0x10;
 var FLAG_PERMISSION = 0x20;
+var FLAG_SUBAGENTS_RUNNING = 0x40;
 
 var KEY_UNVIEWED = 'ocstatus.unviewed.v1';
 var KEY_VIEWED_REPLY = 'ocstatus.viewedReply.v1';
@@ -51,6 +52,7 @@ var SAVED_MARK_READ_AFTER = Number(SAVED_SETTINGS.mark_read_after);
 if (MARK_READ_AFTER_VALUES.indexOf(SAVED_MARK_READ_AFTER) === -1) SAVED_MARK_READ_AFTER = 0;
 var SAVED_CANNED_REPLIES = SAVED_SETTINGS.canned_replies === undefined ?
   DEFAULT_CANNED_REPLIES.slice() : normalizeCannedReplies(SAVED_SETTINGS.canned_replies);
+var SAVED_SUBAGENTS = normalizeSubagents(SAVED_SETTINGS.subagents);
 
 var state = {
   installed: null,
@@ -79,6 +81,7 @@ var state = {
   subscribed: false,
   pollRateSec: SAVED_POLL_RATE,
   onlyAction: !!SAVED_SETTINGS.only_action,
+  subagentsMode: SAVED_SUBAGENTS,
   markReadAfterSec: SAVED_MARK_READ_AFTER,
   cannedReplies: SAVED_CANNED_REPLIES,
   autoReadChecked: false,
@@ -137,6 +140,20 @@ function propText(property) {
 
 function propBool(property) {
   return !!(property && property.boolean && property.boolean.value === true);
+}
+
+function hasPropBool(property) {
+  return !!(property && property.boolean &&
+           typeof property.boolean.value === 'boolean');
+}
+
+function hasPropText(property) {
+  return !!(property && ((property.longText && typeof property.longText.text === 'string') ||
+                         (property.shortText && typeof property.shortText.text === 'string')));
+}
+
+function normalizeSubagents(value) {
+  return value === 'show' || value === 'number' || value === 'hide' ? value : 'show';
 }
 
 function propNumber(property) {
@@ -500,18 +517,62 @@ function nameFor(id) {
   return 'Session';
 }
 
-function rememberSession(id, name, updated) {
+function rememberSession(id, name, updated, classification) {
   if (!id || id === 'new') return;
+  classification = classification || classificationFor(id);
   var clean = cleanName(name || nameFor(id));
   var stamp = updated && updated > 0 ? Math.floor(updated) : Math.floor(Date.now() / 1000);
-  var entry = state.known[id];
-  if (entry && entry.name === clean && entry.updated === stamp) return;
-  if (entry && entry.name && clean.length < entry.name.length && clean.length <= 8) {
-    clean = entry.name;
+  var previous = state.known[id] || {};
+  var entry = { name: clean, updated: stamp };
+  ['isSubagent', 'rootSessionId', 'parentSessionId'].forEach(function (key) {
+    if (Object.prototype.hasOwnProperty.call(previous, key)) entry[key] = previous[key];
+    if (classification && Object.prototype.hasOwnProperty.call(classification, key)) {
+      entry[key] = classification[key];
+    }
+  });
+  var same = previous.name === entry.name && previous.updated === entry.updated &&
+    previous.isSubagent === entry.isSubagent && previous.rootSessionId === entry.rootSessionId &&
+    previous.parentSessionId === entry.parentSessionId;
+  if (same) return;
+  if (previous.name && clean.length < previous.name.length && clean.length <= 8) {
+    entry.name = previous.name;
   }
-  state.known[id] = { name: clean, updated: stamp };
+  state.known[id] = entry;
   pruneKnown();
   writeObject(KEY_KNOWN, state.known);
+}
+
+function classificationFor(id) {
+  var active = activeFor(id);
+  if (active && active.isSubagentClassified) {
+    return {
+      isSubagent: active.subagent,
+      rootSessionId: active.rootSessionId,
+      parentSessionId: active.parentSessionId
+    };
+  }
+  var status = state.chatStatus[id];
+  if (status && status.isSubagentClassified) {
+    return {
+      isSubagent: status.isSubagent,
+      rootSessionId: status.rootSessionId,
+      parentSessionId: status.parentSessionId
+    };
+  }
+  return null;
+}
+
+function updateKnownClassification(id, classification) {
+  var known = state.known[id];
+  if (!known) return;
+  var changed = false;
+  ['isSubagent', 'rootSessionId', 'parentSessionId'].forEach(function (key) {
+    if (!Object.prototype.hasOwnProperty.call(classification, key) ||
+        known[key] === classification[key]) return;
+    known[key] = classification[key];
+    changed = true;
+  });
+  if (changed) writeObject(KEY_KNOWN, state.known);
 }
 
 function pruneKnown() {
@@ -567,6 +628,81 @@ function countAttention(sessions) {
   return count;
 }
 
+function isSubagentSession(id) {
+  var active = activeFor(id);
+  var status = state.chatStatus[id];
+  var known = state.known[id];
+  return !!((active && active.subagent) || (status && status.isSubagent) ||
+            (known && known.isSubagent === true));
+}
+
+function isKnownRootSession(id) {
+  var active = activeFor(id);
+  var status = state.chatStatus[id];
+  var known = state.known[id];
+  return !!(chatFor(id) || (active && active.isSubagentClassified && !active.subagent) ||
+            (status && status.isSubagentClassified && !status.isSubagent) ||
+            (known && known.isSubagent === false));
+}
+
+function rootNameFor(id) {
+  var active = activeFor(id);
+  var status = state.chatStatus[id];
+  var chat = chatFor(id);
+  var known = state.known[id];
+  if (active && !active.subagent && active.name) return cleanName(active.name);
+  if (chat && chat.name) return cleanName(chat.name);
+  if (status && !status.isSubagent && status.name) return cleanName(status.name);
+  if (known && known.isSubagent !== true && known.name) return cleanName(known.name);
+  return cleanName(id);
+}
+
+function activeSubagentGroups() {
+  var childRoots = Object.create(null);
+  var groups = Object.create(null);
+  var unmapped = 0;
+  state.active.forEach(function (active) {
+    if (!active.subagent) return;
+    var root = active.rootSessionId;
+    var parent = active.parentSessionId;
+    if (!isRelationshipId(active.id) || !isRelationshipId(root) ||
+        !isRelationshipId(parent) || root === active.id || parent === active.id ||
+        isSubagentSession(root)) root = '';
+    if (!Object.prototype.hasOwnProperty.call(childRoots, active.id)) {
+      childRoots[active.id] = root;
+    } else if (childRoots[active.id] !== root) {
+      // Conflicting duplicate records are ambiguous; never count the child under either root.
+      childRoots[active.id] = '';
+    }
+  });
+  Object.keys(childRoots).forEach(function (childId) {
+    var root = childRoots[childId];
+    if (!root) {
+      unmapped++;
+      return;
+    }
+    if (!groups[root]) groups[root] = Object.create(null);
+    groups[root][childId] = true;
+  });
+  Object.keys(groups).forEach(function (root) {
+    groups[root] = Object.keys(groups[root]).length;
+  });
+  return { counts: groups, unmapped: unmapped };
+}
+
+function isRelationshipId(id) {
+  return typeof id === 'string' && /^ses[A-Za-z0-9_-]{1,160}$/.test(id) && id !== 'new';
+}
+
+function visibleActiveCount(sessions) {
+  if (state.subagentsMode === 'show') return state.active.length;
+  var count = 0;
+  sessions.forEach(function (session) {
+    if (session.activity) count++;
+  });
+  return count;
+}
+
 function statusText() {
   if (state.installed === false) return 'No OC plugin';
   if (state.errors.active === 'AUTH_REQUIRED' || state.errors.chats === 'AUTH_REQUIRED') {
@@ -577,10 +713,12 @@ function statusText() {
   }
   if (state.errors.active || state.errors.chats) return 'Unavailable';
   if (state.configured === false) return 'Configure';
+  var grouped = state.subagentsMode === 'number' ? activeSubagentGroups() : null;
   var sessions = mergedSessions();
   var attention = countAttention(sessions);
   if (attention > 0) return attention + (attention === 1 ? ' needs you' : ' need you');
-  var active = state.active.length;
+  if (grouped && grouped.unmapped > 0) return 'Update plugin for subagent counts';
+  var active = visibleActiveCount(sessions);
   if (active > 0) return active + ' active';
   if (state.onlyAction && sessions.length === 0) return 'No action';
   if (sessions.length > 0) return 'No active';
@@ -594,6 +732,7 @@ function mergedSessions() {
   var seen = {};
   var chatIds = {};
   var list = [];
+  var groupCounts = state.subagentsMode === 'number' ? activeSubagentGroups().counts : {};
 
   state.chats.forEach(function (chat) { chatIds[chat.id] = true; });
 
@@ -636,20 +775,31 @@ function mergedSessions() {
     if (!status && state.unviewed[id]) {
       flags |= FLAG_UNVIEWED | FLAG_ATTENTION;
     }
+    var subagentCount = groupCounts[id] || 0;
+    if (subagentCount > 0) flags |= FLAG_SUBAGENTS_RUNNING;
     // A new run supersedes an earlier completion badge. Keep permission and question
-    // attention, but a running session with only unread history shows motion, not a dot.
-    if (active && active.status === 'Running' && (flags & FLAG_UNVIEWED) &&
+    // attention, but running root or grouped subagents with only unread history show motion, not a dot.
+    if (((active && active.status === 'Running') || subagentCount > 0) && (flags & FLAG_UNVIEWED) &&
         !(flags & (FLAG_PERMISSION | FLAG_QUESTION))) {
       flags &= ~(FLAG_UNVIEWED | FLAG_ATTENTION);
     }
-    list.push({ id: id, name: cleanName(name), flags: flags, updated: updated || 0 });
+    list.push({
+      id: id,
+      name: cleanName(name),
+      flags: flags,
+      updated: updated || 0,
+      subagentCount: subagentCount > 255 ? 255 : subagentCount,
+      activity: !!active || subagentCount > 0
+    });
   }
 
   function knownOnly(unviewed) {
     return Object.keys(state.known).filter(function (id) {
       if (activeFor(id) || chatIds[id]) return false;
-      if (unviewed) return !!state.unviewed[id] && !state.chatStatus[id];
       var known = state.known[id];
+      if (state.subagentsMode !== 'show' &&
+          (!known || typeof known.isSubagent !== 'boolean' || known.isSubagent)) return false;
+      if (unviewed) return !!state.unviewed[id] && !state.chatStatus[id];
       return !state.unviewed[id] &&
              ((state.questions[id] && state.questions[id].length) ||
               now - (known.updated || 0) < KNOWN_MAX_AGE_SEC);
@@ -668,6 +818,11 @@ function mergedSessions() {
   // Running sessions first in the plugin's parent-before-child order, then chats that need
   // action, then completions that are not in the chat list, then the chat list in plugin order.
   state.active.forEach(function (active) { add(active.id, active.name, active.updated); });
+  if (state.subagentsMode === 'number') {
+    Object.keys(groupCounts).forEach(function (rootId) {
+      add(rootId, rootNameFor(rootId), state.known[rootId] && state.known[rootId].updated);
+    });
+  }
   Object.keys(state.chatStatus)
     .filter(function (id) { return state.chatStatus[id].needsAction; })
     .sort(function (a, b) {
@@ -683,11 +838,18 @@ function mergedSessions() {
     add(id, state.chatStatus[id].name, state.chatStatus[id].updated);
   });
   knownOnly(false).forEach(function (id) { add(id, state.known[id].name, state.known[id].updated); });
-  Object.keys(state.questions).forEach(function (id) { add(id, 'Question', 0); });
+  Object.keys(state.questions).forEach(function (id) {
+    if (state.subagentsMode === 'show' || isKnownRootSession(id)) add(id, 'Question', 0);
+  });
+
+  if (state.subagentsMode !== 'show') {
+    list = list.filter(function (session) { return !isSubagentSession(session.id); });
+  }
 
   if (state.onlyAction) {
     list = list.filter(function (session) {
-      return (session.flags & (FLAG_RUNNING | FLAG_ATTENTION | FLAG_UNVIEWED)) !== 0;
+      return (session.flags & (FLAG_RUNNING | FLAG_ATTENTION | FLAG_UNVIEWED |
+                               FLAG_SUBAGENTS_RUNNING)) !== 0;
     });
   }
   return list.slice(0, MAX_SESSIONS);
@@ -696,7 +858,7 @@ function mergedSessions() {
 function listSignature(sessions) {
   var signature = [];
   sessions.forEach(function (session) {
-    signature.push([session.id, session.name, session.flags].join('\u0001'));
+    signature.push([session.id, session.name, session.flags, session.subagentCount || 0].join('\u0001'));
   });
   return signature.join('\u0002') + '\u0003' + statusText();
 }
@@ -710,12 +872,14 @@ function sendList(force) {
 
   var messages = [{ list_begin: 1, count: sessions.length }];
   sessions.forEach(function (session, index) {
-    messages.push({
+    var message = {
       index: index,
       session_id: session.id,
       session_name: session.name,
       session_flags: session.flags
-    });
+    };
+    if (session.subagentCount > 0) message.subagent_count = session.subagentCount;
+    messages.push(message);
   });
   messages.push({ list_end: 1, status_text: statusText() });
   enqueueList(messages);
@@ -744,7 +908,11 @@ function onChats(envelope) {
     var properties = instance.properties || {};
     var name = cleanName(propText(properties.name) || propText(properties.title));
     chats.push({ id: instance.instanceId, name: name });
-    rememberSession(instance.instanceId, name, 0);
+    rememberSession(instance.instanceId, name, 0, {
+      isSubagent: false,
+      rootSessionId: instance.instanceId,
+      parentSessionId: ''
+    });
   });
   state.chats = chats;
   rebuild();
@@ -762,16 +930,48 @@ function onActive(envelope) {
     var id = instance.instanceId;
     var status = propText(properties.status) || 'Running';
     var name = cleanName(propText(properties.name) || propText(properties.title));
-    var subagent = propBool(properties.is_subagent);
+    var isSubagentClassified = hasPropBool(properties.is_subagent);
+    var subagent = isSubagentClassified ? propBool(properties.is_subagent) :
+      !!(state.known[id] && state.known[id].isSubagent === true);
+    var rootSessionId = propText(properties.root_session_id);
+    var parentSessionId = propText(properties.parent_session_id);
     var updated = propNumber(properties.updated);
 
-    next[id] = { subagent: subagent };
-    active.push({ id: id, name: name, status: status, subagent: subagent, updated: updated });
+    next[id] = {
+      subagent: subagent,
+      rootSessionId: rootSessionId,
+      parentSessionId: parentSessionId
+    };
+    active.push({
+      id: id,
+      name: name,
+      status: status,
+      subagent: subagent,
+      isSubagentClassified: isSubagentClassified,
+      rootSessionId: rootSessionId,
+      parentSessionId: parentSessionId,
+      updated: updated
+    });
 
     // A new run supersedes an old completion badge. Subagents are support activity, not
     // sessions the user chose, so they do not become their own remembered history entries.
     if (!previous[id] && state.unviewed[id]) clearUnviewed(id);
-    if (!subagent) rememberSession(id, name, updated);
+    if (isSubagentClassified) {
+      var classification = {
+        isSubagent: subagent,
+        rootSessionId: subagent ? rootSessionId : (rootSessionId || id),
+        parentSessionId: subagent ? parentSessionId : ''
+      };
+      if (subagent) {
+        // Active support work is not history. Refresh classification only when a
+        // legitimate history record already exists; preserve its name and timestamp.
+        updateKnownClassification(id, classification);
+      } else {
+        rememberSession(id, name, updated, classification);
+      }
+    } else if (!subagent) {
+      rememberSession(id, name, updated);
+    }
   });
 
   Object.keys(previous).forEach(function (id) {
@@ -804,7 +1004,10 @@ function chatStatusEntry(properties) {
     unread: propBool(properties.unread),
     updated: propNumber(properties.updated),
     isDefault: propBool(properties.is_default),
-    isSubagent: propBool(properties.is_subagent)
+    isSubagent: propBool(properties.is_subagent),
+    isSubagentClassified: hasPropBool(properties.is_subagent),
+    rootSessionId: propText(properties.root_session_id),
+    parentSessionId: propText(properties.parent_session_id)
   };
 }
 
@@ -829,7 +1032,22 @@ function onChatStatus(envelope) {
       recomputeChatStatus(entry);
     }
     map[entry.sessionId] = entry;
-    rememberSession(entry.sessionId, entry.name, entry.updated);
+    var classification = null;
+    if (entry.isSubagentClassified) {
+      classification = { isSubagent: entry.isSubagent };
+      if (hasPropText((instance.properties || {}).root_session_id)) {
+        classification.rootSessionId = entry.isSubagent ? entry.rootSessionId :
+          (entry.rootSessionId || entry.sessionId);
+      } else if (!entry.isSubagent) {
+        classification.rootSessionId = entry.sessionId;
+      }
+      if (hasPropText((instance.properties || {}).parent_session_id)) {
+        classification.parentSessionId = entry.parentSessionId;
+      } else if (!entry.isSubagent) {
+        classification.parentSessionId = '';
+      }
+    }
+    rememberSession(entry.sessionId, entry.name, entry.updated, classification);
   });
   state.chatStatus = map;
   maybeAutoMarkRead();
@@ -2002,7 +2220,8 @@ function applyPollingMode() {
 
 function applySettings(options) {
   if (!options || (options.poll_rate === undefined && options.only_action === undefined &&
-      options.mark_read_after === undefined && options.canned_replies === undefined)) return;
+      options.mark_read_after === undefined && options.canned_replies === undefined &&
+      options.subagents === undefined)) return;
   var rateChanged = false;
   var filterChanged = false;
   var markChanged = false;
@@ -2017,6 +2236,11 @@ function applySettings(options) {
     filterChanged = only !== state.onlyAction;
     state.onlyAction = only;
   }
+  if (options.subagents !== undefined) {
+    var subagents = normalizeSubagents(options.subagents);
+    filterChanged = filterChanged || subagents !== state.subagentsMode;
+    state.subagentsMode = subagents;
+  }
   if (options.mark_read_after !== undefined) {
     var markReadAfter = Number(options.mark_read_after);
     if (MARK_READ_AFTER_VALUES.indexOf(markReadAfter) === -1) markReadAfter = 0;
@@ -2030,6 +2254,7 @@ function applySettings(options) {
   writeObject(KEY_SETTINGS, {
     poll_rate: state.pollRateSec,
     only_action: state.onlyAction ? 1 : 0,
+    subagents: state.subagentsMode,
     mark_read_after: state.markReadAfterSec,
     canned_replies: state.cannedReplies
   });
@@ -2249,6 +2474,7 @@ Pebble.addEventListener('showConfiguration', function () {
   var html = CONFIG_PAGE
     .replace(/__OC_POLL_RATE__/g, String(state.pollRateSec))
     .replace(/__OC_ONLY_ACTION__/g, state.onlyAction ? '1' : '0')
+    .replace(/__OC_SUBAGENTS__/g, state.subagentsMode)
     .replace(/__OC_MARK_READ_AFTER__/g, String(state.markReadAfterSec));
   html = html.split('__OC_CANNED_REPLIES__')
     .join(escapeHtml(state.cannedReplies.join('\n')));

@@ -1,7 +1,7 @@
 {
   "name": "oc-status",
   "author": "OpenCode for Pebble contributors",
-  "version": "1.7.3",
+  "version": "1.7.4",
   "keywords": [
     "pebble-app"
   ],
@@ -101,7 +101,8 @@
       "canned_count",
       "canned_end",
       "reply_cap",
-      "inbox_size"
+      "inbox_size",
+      "subagent_count"
     ],
     "resources": {
       "media": [

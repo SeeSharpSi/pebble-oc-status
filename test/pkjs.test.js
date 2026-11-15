@@ -13,6 +13,7 @@ function harness(options = {}) {
   const subscriptions = [];
   const sent = [];
   const storage = new Map();
+  Object.keys(options.storage || {}).forEach((key) => storage.set(key, options.storage[key]));
   const actions = [];
   const opened = [];
   const sourceEnvelopes = new Map();
@@ -186,6 +187,20 @@ function session(id, name, status = 'Running') {
   };
 }
 
+function subagentSession(id, rootId, parentId, name = id, status = 'Running') {
+  const instance = session(id, name, status);
+  instance.properties.is_subagent.boolean.value = true;
+  if (rootId !== undefined) instance.properties.root_session_id = { longText: { text: rootId } };
+  if (parentId !== undefined) instance.properties.parent_session_id = { longText: { text: parentId } };
+  return instance;
+}
+
+function setSubagentMode(h, mode) {
+  h.handlers.webviewclosed({
+    response: encodeURIComponent(JSON.stringify({ subagents: mode }))
+  });
+}
+
 function chat(id, name) {
   return {
     instanceId: id,
@@ -244,6 +259,18 @@ function replyFrames(messages) {
   if (start === undefined) return [];
   const end = messages.findIndex((message, index) => index > start && message.reply_end);
   return messages.slice(start, end < 0 ? undefined : end + 1);
+}
+
+function listRows(messages) {
+  const end = messages.map((message, index) => message.list_end ? index : -1)
+    .filter((index) => index >= 0).pop();
+  if (end === undefined) return [];
+  let start = 0;
+  for (let index = 0; index < end; index++) {
+    if (messages[index].list_begin) start = index;
+  }
+  return messages.slice(start + 1, end).filter((message) =>
+    message.index !== undefined && message.session_id !== undefined);
 }
 
 function dictionaryBytes(message) {
@@ -320,6 +347,374 @@ test('sessions merge chats and active runs with the right status indicators', ()
   assert.equal(sessions[1].flags & 1, 1, 'running spinner');
   assert.equal(sessions[2].flags & 2, 2, 'attention dot');
   assert.equal(sessions[2].flags & 4, 4, 'question');
+});
+
+test('subagent setting defaults to Show, falls back on invalid values, persists, and injects', () => {
+  const h = harness();
+  h.fire('opencode', 'active_session', {
+    instances: [session('ses_root', 'Root'), subagentSession('ses_child', 'ses_root', 'ses_root')]
+  });
+  let sessions = h.sessionMessages(h.takeSent());
+  assert.deepEqual(sessions.map((entry) => entry.id), ['ses_root', 'ses_child']);
+  assert.ok(sessions[1].flags & 0x10, 'default Show preserves child flag and row');
+
+  h.handlers.showConfiguration();
+  let html = decodeURIComponent(h.opened.pop().slice('data:text/html;charset=utf-8,'.length));
+  assert.match(html, /var injectedSubagents = 'show';/);
+  setSubagentMode(h, 'invalid');
+  let settings = JSON.parse(h.storage.get('ocstatus.settings.v1'));
+  assert.equal(settings.subagents, 'show');
+  h.handlers.showConfiguration();
+  html = decodeURIComponent(h.opened.pop().slice('data:text/html;charset=utf-8,'.length));
+  assert.match(html, /var injectedSubagents = 'show';/);
+
+  setSubagentMode(h, 'number');
+  settings = JSON.parse(h.storage.get('ocstatus.settings.v1'));
+  assert.equal(settings.subagents, 'number');
+  h.handlers.showConfiguration();
+  html = decodeURIComponent(h.opened.pop().slice('data:text/html;charset=utf-8,'.length));
+  assert.match(html, /var injectedSubagents = 'number';/);
+});
+
+test('Show keeps fresh support activity out of history and preserves known roots across reload', () => {
+  const now = Math.floor(Date.now() / 1000);
+  const known = { ses_root: { name: 'Root history', updated: now } };
+  for (let i = 0; i < 39; i++) {
+    known['legacy_' + i] = { name: 'Legacy ' + i, updated: now - 100 - i };
+  }
+  const h = harness({ storage: { 'ocstatus.known.v1': JSON.stringify(known) } });
+  h.fire('opencode', 'active_session', {
+    instances: [subagentSession('ses_fresh_child', 'ses_root', 'ses_root')]
+  });
+  let sessions = h.sessionMessages(h.takeSent());
+  assert.ok(sessions.some((entry) => entry.id === 'ses_fresh_child'), 'Show lists active child');
+  let saved = JSON.parse(h.storage.get('ocstatus.known.v1'));
+  assert.equal(saved.ses_fresh_child, undefined, 'fresh support child is not remembered');
+  assert.ok(saved.ses_root, 'active support does not evict root history');
+
+  h.fire('opencode', 'active_session', { instances: [] });
+  sessions = h.sessionMessages(h.takeSent());
+  assert.equal(sessions.some((entry) => entry.id === 'ses_fresh_child'), false,
+    'finished support child disappears');
+  saved = JSON.parse(h.storage.get('ocstatus.known.v1'));
+  assert.equal(saved.ses_fresh_child, undefined);
+  assert.ok(saved.ses_root);
+
+  const reloaded = harness({ storage: Object.fromEntries(h.storage) });
+  sessions = reloaded.sessionMessages(reloaded.takeSent());
+  assert.equal(sessions.some((entry) => entry.id === 'ses_fresh_child'), false,
+    'reload does not resurrect fresh support child');
+  assert.ok(sessions.some((entry) => entry.id === 'ses_root'), 'root history survives reload');
+});
+
+test('legitimate reply history inherits active child classification', () => {
+  const h = harness();
+  h.fire('opencode', 'active_session', {
+    instances: [subagentSession('ses_child', 'ses_root', 'ses_root')]
+  });
+  h.fire('opencode', 'reply', {
+    instances: [reply('ses_child', 'msg_child', 'Remembered child reply')]
+  });
+  const known = JSON.parse(h.storage.get('ocstatus.known.v1'));
+  assert.equal(known.ses_child.isSubagent, true);
+  assert.equal(known.ses_child.rootSessionId, 'ses_root');
+  assert.equal(known.ses_child.parentSessionId, 'ses_root');
+  setSubagentMode(h, 'hide');
+  assert.equal(h.sessionMessages(h.takeSent()).some((entry) => entry.id === 'ses_child'), false,
+    'later hidden mode filters legitimate cached child history');
+});
+
+test('active child classification updates existing history without changing its identity or age', () => {
+  const original = { name: 'Saved child title', updated: 1234567890 };
+  const h = harness({ storage: {
+    'ocstatus.known.v1': JSON.stringify({ ses_child: original })
+  } });
+  h.fire('opencode', 'active_session', {
+    instances: [subagentSession('ses_child', 'ses_root', 'ses_root', 'Live tool name')]
+  });
+  const known = JSON.parse(h.storage.get('ocstatus.known.v1'));
+  assert.equal(known.ses_child.name, original.name);
+  assert.equal(known.ses_child.updated, original.updated);
+  assert.equal(known.ses_child.isSubagent, true);
+  assert.equal(known.ses_child.rootSessionId, 'ses_root');
+  assert.equal(known.ses_child.parentSessionId, 'ses_root');
+});
+
+test('Hide removes active, completed, unread, question, permission, and cached child rows', () => {
+  const h = harness();
+  h.fire('agent', 'chats', { instances: [chat('ses_root', 'Root chat')] });
+  h.fire('opencode', 'active_session', {
+    instances: [subagentSession('ses_child', 'ses_root', 'ses_root')]
+  });
+  setSubagentMode(h, 'hide');
+  assert.equal(h.sessionMessages(h.takeSent()).some((entry) => entry.id === 'ses_child'), false,
+    'active child hidden immediately');
+  h.fire('opencode', 'active_session', { instances: [] });
+  const childStatus = chatStatusRow('ses_child', 'Child', {
+    reason: 'Permission', permissionCount: 1, questionCount: 1,
+    unread: true, messageId: 'msg_child'
+  });
+  childStatus.properties.is_subagent = { boolean: { value: true } };
+  h.fire('opencode', 'chat_status', { instances: [childStatus] });
+  h.fire('opencode', 'question', {
+    instances: [question('ses_child', 'frm_child', [
+      { key: 'choice', type: 'string', options: [{ value: 'yes', label: 'Yes' }] }
+    ])]
+  });
+  h.fire('opencode', 'reply', { instances: [reply('ses_child', 'msg_child', 'Cached child reply')] });
+  h.takeSent();
+  h.watch({ req: 1 });
+  let sessions = h.sessionMessages(h.takeSent());
+  assert.deepEqual(sessions.map((entry) => entry.id), ['ses_root']);
+  assert.equal(h.actions.length, 0, 'hiding did not dismiss child state');
+
+  setSubagentMode(h, 'show');
+  sessions = h.sessionMessages(h.takeSent());
+  const child = sessions.find((entry) => entry.id === 'ses_child');
+  assert.ok(child);
+  assert.ok(child.flags & 0x20, 'child permission retained');
+  assert.ok(child.flags & 0x04, 'child question retained');
+  assert.ok(child.flags & 0x08, 'child unread/cache retained');
+});
+
+test('Number groups nested children, idle and absent roots, and deduplicates child IDs', () => {
+  const h = harness();
+  setSubagentMode(h, 'number');
+  h.fire('agent', 'chats', { instances: [chat('ses_root2', 'Idle named root')] });
+  h.fire('opencode', 'active_session', {
+    instances: [
+      session('ses_root1', 'Running root'),
+      subagentSession('ses_child1', 'ses_root1', 'ses_root1'),
+      subagentSession('ses_child2', 'ses_root1', 'ses_child1', 'Nested child', 'Waiting for input'),
+      subagentSession('ses_child2', 'ses_root1', 'ses_child1', 'Duplicate child', 'Running'),
+      subagentSession('ses_child3', 'ses_root2', 'ses_root2'),
+      subagentSession('ses_child4', 'ses_absent', 'ses_absent')
+    ]
+  });
+  const messages = h.takeSent();
+  const sessions = h.sessionMessages(messages);
+  assert.deepEqual(sessions.map((entry) => entry.id), ['ses_root1', 'ses_root2', 'ses_absent']);
+  assert.equal(sessions[0].flags & 0x01, 0x01, 'root own run remains actual-running flag');
+  assert.ok(sessions[0].flags & 0x40);
+  assert.equal(messages.find((message) => message.session_id === 'ses_root1' && message.subagent_count).subagent_count, 2);
+  assert.equal(sessions[1].name, 'Idle named root', 'idle root uses its own chat name');
+  assert.equal(messages.find((message) => message.session_id === 'ses_root2' && message.subagent_count).subagent_count, 1);
+  assert.equal(sessions[1].flags & 0x01, 0, 'child activity does not alter activeFor(root)');
+  assert.ok(sessions[1].flags & 0x40, 'idle parent gets group display flag');
+  assert.equal(sessions[2].name, 'ses_absent', 'unlisted root falls back to root ID');
+  assert.equal(messages.find((message) => message.session_id === 'ses_absent' && message.subagent_count).subagent_count, 1);
+  assert.equal(sessions.some((entry) => entry.id.indexOf('ses_child') === 0), false);
+});
+
+test('Number rejects malformed relationships and conflicting duplicate children safely', () => {
+  const h = harness();
+  setSubagentMode(h, 'number');
+  const instances = [
+    subagentSession('ses_proto', '__proto__', 'ses_root'),
+    subagentSession('ses_constructor', 'constructor', 'ses_root'),
+    subagentSession('ses_bad_space', 'bad id', 'ses_root'),
+    subagentSession('ses_self', 'ses_self', 'ses_self'),
+    subagentSession('ses_missing_root', undefined, 'ses_root'),
+    subagentSession('ses_missing_parent', 'ses_root', undefined),
+    subagentSession('ses_bad_parent', 'ses_root', 'bad parent'),
+    subagentSession('ses_new_root', 'new', 'ses_root'),
+    subagentSession('ses_conflict', 'ses_root1', 'ses_root1'),
+    subagentSession('ses_conflict', 'ses_root2', 'ses_root2')
+  ];
+  h.fire('opencode', 'active_session', { instances });
+  const messages = h.takeSent();
+  assert.deepEqual(listRows(messages), [], 'invalid or ambiguous relationships create no root rows');
+  assert.match(messages.slice().reverse().find((message) => message.list_end).status_text,
+    /Update plugin for subagent counts/);
+  assert.equal(Object.prototype.ses_proto, undefined, 'relationship data cannot mutate Object.prototype');
+  assert.equal(Object.prototype.polluted, undefined);
+});
+
+test('Number counts before row cap, clamps wire count, changes signature, and clears zero count', () => {
+  const h = harness();
+  setSubagentMode(h, 'number');
+  h.fire('agent', 'chats', { instances: [chat('ses_root', 'Root')] });
+  const many = Array.from({ length: 260 }, (_, index) =>
+    subagentSession('ses_child_' + index, 'ses_root', 'ses_root'));
+  many.push(many[0]);
+  h.fire('opencode', 'active_session', { instances: many });
+  let messages = h.takeSent();
+  let rootRow = listRows(messages).find((message) => message.session_id === 'ses_root');
+  assert.ok(rootRow, 'group root survives the 20-row cap');
+  assert.equal(rootRow.subagent_count, 255, '260 unique children clamp to uint8');
+  assert.equal(listRows(messages).length, 1);
+  assert.equal(messages.slice().reverse().find((message) => message.list_end).status_text, '1 active',
+    'footer reports one grouped visible root, not 260 hidden children');
+
+  h.fire('opencode', 'active_session', {
+    instances: [many[0], subagentSession('ses_extra', 'ses_root', 'ses_root')]
+  });
+  messages = h.takeSent();
+  rootRow = listRows(messages).find((message) => message.session_id === 'ses_root');
+  assert.equal(rootRow.subagent_count, 2, 'count changes despite unchanged group flag');
+  assert.ok(messages.some((message) => message.list_begin), 'count signature change sends a list');
+
+  h.fire('opencode', 'active_session', { instances: [many[0]] });
+  messages = h.takeSent();
+  rootRow = listRows(messages).find((message) => message.session_id === 'ses_root');
+  assert.equal(rootRow.subagent_count, 1, 'finished child decrements count');
+
+  h.fire('opencode', 'active_session', { instances: [session('ses_root', 'Root')] });
+  messages = h.takeSent();
+  rootRow = listRows(messages).find((message) => message.session_id === 'ses_root');
+  assert.equal(rootRow.subagent_count, undefined, 'zero count is implicit');
+  assert.equal(rootRow.session_flags & 0x40, 0, 'group flag clears at zero');
+});
+
+test('Only-action promotes grouped root; unmapped legacy children warn only in Number', () => {
+  const h = harness();
+  setSubagentMode(h, 'number');
+  h.handlers.webviewclosed({ response: encodeURIComponent(JSON.stringify({ only_action: 1 })) });
+  h.fire('opencode', 'active_session', {
+    instances: [subagentSession('ses_child', 'ses_root', 'ses_root')]
+  });
+  let messages = h.takeSent();
+  let sessions = h.sessionMessages(messages);
+  assert.deepEqual(sessions.map((entry) => entry.id), ['ses_root']);
+  assert.ok(sessions[0].flags & 0x40);
+
+  h.fire('opencode', 'active_session', {
+    instances: [
+      subagentSession('ses_old_child'),
+      subagentSession('ses_self_root', 'ses_self_root', 'ses_self_root')
+    ]
+  });
+  messages = h.takeSent();
+  assert.equal(h.sessionMessages(messages).length, 0, 'unmapped child is not promoted');
+  assert.match(messages.find((message) => message.list_end).status_text, /Update plugin for subagent counts/);
+  setSubagentMode(h, 'hide');
+  messages = h.takeSent();
+  assert.doesNotMatch(messages.find((message) => message.list_end).status_text, /Update plugin/);
+  setSubagentMode(h, 'show');
+  sessions = h.sessionMessages(h.takeSent());
+  assert.ok(sessions.some((entry) => entry.id === 'ses_old_child'), 'Show remains compatible with older plugin');
+});
+
+test('unclassified legacy known-only rows stay hidden outside Show without losing metadata', () => {
+  const now = Math.floor(Date.now() / 1000);
+  const h = harness({ storage: {
+    'ocstatus.known.v1': JSON.stringify({
+      legacy: { name: 'Legacy cached row', updated: now },
+      cachedChild: {
+        name: 'Cached child', updated: now, isSubagent: true,
+        rootSessionId: 'ses_root', parentSessionId: 'ses_root'
+      },
+      rememberedRoot: {
+        name: 'Remembered root', updated: now, isSubagent: false,
+        rootSessionId: 'rememberedRoot', parentSessionId: ''
+      }
+    }),
+    'ocstatus.settings.v1': JSON.stringify({ subagents: 'number' })
+  } });
+  let sessions = h.sessionMessages(h.takeSent());
+  assert.deepEqual(sessions.map((entry) => entry.id), ['rememberedRoot']);
+
+  h.fire('agent', 'chats', { instances: [chat('ses_root', 'Root chat')] });
+  h.fire('opencode', 'active_session', {
+    instances: [subagentSession('ses_newChild', 'ses_root', 'ses_root')]
+  });
+  let known = JSON.parse(h.storage.get('ocstatus.known.v1'));
+  assert.equal(known.ses_newChild, undefined, 'active support alone creates no history entry');
+  const childStatus = chatStatusRow('ses_newChild', 'Cached child', {});
+  childStatus.properties.is_subagent = { boolean: { value: true } };
+  childStatus.properties.root_session_id = { longText: { text: 'ses_root' } };
+  childStatus.properties.parent_session_id = { longText: { text: 'ses_root' } };
+  h.fire('opencode', 'chat_status', { instances: [childStatus] });
+  known = JSON.parse(h.storage.get('ocstatus.known.v1'));
+  assert.equal(known.ses_root.isSubagent, false, 'authoritative chat root stays classified');
+  assert.equal(known.ses_root.rootSessionId, 'ses_root');
+  assert.equal(known.ses_newChild.isSubagent, true);
+  assert.equal(known.ses_newChild.rootSessionId, 'ses_root');
+  assert.equal(known.ses_newChild.parentSessionId, 'ses_root');
+
+  setSubagentMode(h, 'hide');
+  sessions = h.sessionMessages(h.takeSent());
+  assert.equal(sessions.some((entry) => entry.id === 'cachedChild' || entry.id === 'legacy'), false);
+  setSubagentMode(h, 'show');
+  sessions = h.sessionMessages(h.takeSent());
+  assert.ok(sessions.some((entry) => entry.id === 'legacy'), 'Show preserves legacy cache behavior');
+});
+
+test('grouped child activity does not make idle root steer dictated messages', async () => {
+  const h = harness();
+  setSubagentMode(h, 'number');
+  h.fire('opencode', 'active_session', {
+    instances: [subagentSession('ses_child', 'ses_root', 'ses_root')]
+  });
+  const root = h.sessionMessages(h.takeSent()).find((entry) => entry.id === 'ses_root');
+  assert.ok(root.flags & 0x40);
+  assert.equal(root.flags & 0x01, 0, 'aggregated flag is not root FLAG_RUNNING');
+
+  h.watch({ send_prompt_begin: 1, session_id: 'ses_root', send_delivery: 0, send_prompt_count: 1 });
+  h.watch({ send_prompt_index: 0, send_prompt_chunk: 'Queue this to the root.' });
+  h.watch({ send_prompt_end: 1 });
+  await new Promise((resolve) => setImmediate(resolve));
+  assert.equal(h.actions[0].args.delivery, 'queue');
+  assert.equal(h.actions[0].args.chat_id, 'ses_root');
+});
+
+test('root permission keeps priority; child permission and question never route to parent', async () => {
+  const h = harness();
+  setSubagentMode(h, 'number');
+  h.fire('agent', 'chats', { instances: [chat('ses_root', 'Root')] });
+  h.fire('opencode', 'active_session', {
+    instances: [
+      subagentSession('ses_child', 'ses_root', 'ses_root', 'Child', 'Waiting for input'),
+      subagentSession('ses_old_child')
+    ]
+  });
+  const rootStatus = chatStatusRow('ses_root', 'Root', {
+    reason: 'Permission', permissionCount: 1
+  });
+  const childStatus = chatStatusRow('ses_child', 'Child', {
+    reason: 'Permission', permissionCount: 1, questionCount: 1
+  });
+  childStatus.properties.is_subagent = { boolean: { value: true } };
+  h.fire('opencode', 'chat_status', { instances: [rootStatus, childStatus] });
+  h.fire('opencode', 'question', {
+    instances: [question('ses_child', 'frm_child', [
+      { key: 'choice', type: 'string', options: [{ value: 'yes', label: 'Yes' }] }
+    ])]
+  });
+  h.setPermission({
+    instances: [
+      permissionRow('ses_child', 'Child', 'child_perm', 'shell', ['echo child']),
+      permissionRow('ses_root', 'Root', 'root_perm', 'shell', ['echo root'])
+    ]
+  });
+  const listMessages = h.takeSent();
+  let sessions = h.sessionMessages(listMessages);
+  const root = sessions.find((entry) => entry.id === 'ses_root');
+  assert.ok(root.flags & 0x20, 'root permission priority retained');
+  assert.ok(root.flags & 0x40, 'child activity grouped on root');
+  assert.equal(root.flags & 0x04, 0, 'child question not bubbled to root');
+  assert.equal(listMessages.slice().reverse().find((message) => message.list_end).status_text, '1 needs you',
+    'root permission attention outranks unmapped-child warning');
+
+  h.watch({ detail_req: 1, session_id: 'ses_root' });
+  await new Promise((resolve) => setImmediate(resolve));
+  let detail = h.takeSent().find((message) => message.detail_kind === 4);
+  assert.ok(detail);
+  assert.equal(detail.permission_request_id, 'root_perm');
+
+  setSubagentMode(h, 'show');
+  h.takeSent();
+  h.watch({ detail_req: 1, session_id: 'ses_child' });
+  await new Promise((resolve) => setImmediate(resolve));
+  detail = h.takeSent().find((message) => message.detail_kind === 4);
+  assert.ok(detail, 'child permission remains stored');
+  assert.equal(detail.permission_request_id, 'child_perm');
+  h.setPermission({ instances: [permissionRow('ses_root', 'Root', 'root_perm', 'shell', ['echo root'])] });
+  h.advanceTime(11000);
+  h.watch({ detail_req: 1, session_id: 'ses_child' });
+  await new Promise((resolve) => setImmediate(resolve));
+  assert.ok(h.takeSent().some((message) => message.detail_kind === 2), 'child question remains stored');
+  assert.equal(h.actions.length, 0, 'no question/permission was auto-dismissed');
 });
 
 test('opening a question shows its choices and submits the selected value', async () => {

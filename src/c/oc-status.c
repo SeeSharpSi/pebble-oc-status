@@ -9,6 +9,7 @@
 // test harness can compile and exercise the real code with OC_STATUS_ANIMATION_TEST defined.
 #include <stdbool.h>
 #include <stddef.h>
+#include <stdio.h>
 #include <stdint.h>
 
 #define MAX_SESSIONS 20
@@ -28,6 +29,8 @@
 #define QUESTION_PROMPT_HEIGHT 30
 #define SPINNER_BOX_HEIGHT 24
 #define SPINNER_NUDGE 3
+#define GROUP_COUNT_WIDTH 24
+#define GROUP_COUNT_GAP 4
 #define FOOTER_HEIGHT 18
 #define DETAIL_BODY_Y HEADER_HEIGHT
 #ifdef PBL_PLATFORM_APLITE
@@ -51,6 +54,7 @@
 #define FLAG_UNVIEWED 0x08
 #define FLAG_SUBAGENT 0x10
 #define FLAG_PERMISSION 0x20
+#define FLAG_SUBAGENTS_RUNNING 0x40
 
 #define DETAIL_REPLY 1
 #define DETAIL_QUESTION 2
@@ -70,7 +74,31 @@
 #endif
 
 static bool session_shows_spinner(uint8_t flags) {
-  return (flags & FLAG_RUNNING) && !(flags & (FLAG_PERMISSION | FLAG_QUESTION));
+  return (flags & (FLAG_RUNNING | FLAG_SUBAGENTS_RUNNING)) &&
+         !(flags & (FLAG_PERMISSION | FLAG_QUESTION));
+}
+
+static uint8_t oc_clamp_subagent_count(int count) {
+  if (count < 0) return 0;
+  if (count > 255) return 255;
+  return (uint8_t)count;
+}
+
+static uint8_t oc_subagent_count_value(int count) {
+  return oc_clamp_subagent_count(count);
+}
+
+static int oc_group_count_slot_width(uint8_t count) {
+  return count ? GROUP_COUNT_WIDTH + GROUP_COUNT_GAP : 0;
+}
+
+static int oc_group_count_x(uint8_t count, int icon_x) {
+  return count ? icon_x - GROUP_COUNT_GAP - GROUP_COUNT_WIDTH : icon_x;
+}
+
+static void oc_format_group_count(uint8_t count, char text[4]) {
+  if (count) snprintf(text, 4, "%u", (unsigned)count);
+  else text[0] = '\0';
 }
 
 typedef enum {
@@ -223,6 +251,7 @@ typedef struct {
   char id[SESSION_ID_LEN];
   char name[SESSION_NAME_LEN];
   uint8_t flags;
+  uint8_t subagent_count;
 } Session;
 
 typedef struct {
@@ -274,6 +303,7 @@ static char s_detail_name[SESSION_NAME_LEN];
 static char s_detail_message_id[96];
 static char s_permission_request_id[128];
 static uint8_t s_detail_flags;
+static uint8_t s_detail_subagent_count;
 static bool s_detail_open;
 static bool s_detail_visible;
 static bool s_detail_header_single;
@@ -481,6 +511,38 @@ static void draw_spinner(GContext *ctx, GRect frame, GColor color, int frame_ind
   draw_braille(ctx, origin, BRAILLE_FRAMES[index]);
 }
 
+static void draw_group_count(GContext *ctx, uint8_t count, int icon_x, int center_y,
+                             GColor color) {
+  if (!count) return;
+  char text[4];
+  oc_format_group_count(count, text);
+  graphics_context_set_text_color(ctx, color);
+  graphics_draw_text(ctx, text, fonts_get_system_font(FONT_KEY_GOTHIC_14),
+                     GRect(oc_group_count_x(count, icon_x), center_y - 8,
+                           GROUP_COUNT_WIDTH, 16),
+                     GTextOverflowModeTrailingEllipsis, GTextAlignmentRight, NULL);
+}
+
+static void draw_status_indicator(GContext *ctx, uint8_t flags, uint8_t subagent_count,
+                                  GRect icon_frame, GColor spinner_color,
+                                  bool highlighted, bool fallback_dot) {
+  int center_y = icon_frame.size.h / 2;
+  draw_group_count(ctx, subagent_count, icon_frame.origin.x, center_y, spinner_color);
+  if (flags & (FLAG_PERMISSION | FLAG_QUESTION)) {
+    draw_reason_dot(ctx, GPoint(icon_frame.origin.x + icon_frame.size.w / 2, center_y),
+                    flags, highlighted);
+  } else if (session_shows_spinner(flags)) {
+    spinner_ensure();
+    GRect spinner_rect = GRect(icon_frame.origin.x,
+                               (icon_frame.size.h - SPINNER_BOX_HEIGHT) / 2 + SPINNER_NUDGE,
+                               icon_frame.size.w, SPINNER_BOX_HEIGHT);
+    draw_spinner(ctx, spinner_rect, spinner_color, s_spin_frame);
+  } else if (fallback_dot || (flags & (FLAG_ATTENTION | FLAG_UNVIEWED))) {
+    draw_reason_dot(ctx, GPoint(icon_frame.origin.x + icon_frame.size.w / 2, center_y),
+                    flags, highlighted);
+  }
+}
+
 // ---------------------------------------------------------------- session list
 
 static uint16_t list_get_num_sections(MenuLayer *menu_layer, void *data) {
@@ -532,7 +594,9 @@ static void list_draw_row(GContext *ctx, const Layer *cell_layer, MenuIndex *cel
   graphics_fill_rect(ctx, bounds, 0, GCornerNone);
 
   // Status lives on the right: names get the full width when there is nothing to show.
-  bool has_status = (session->flags & (FLAG_ATTENTION | FLAG_UNVIEWED | FLAG_RUNNING)) != 0;
+  bool has_status = (session->flags & (FLAG_ATTENTION | FLAG_UNVIEWED |
+                                       FLAG_RUNNING | FLAG_SUBAGENTS_RUNNING)) != 0 ||
+                     session->subagent_count > 0;
   int name_x = PBL_IF_ROUND_ELSE(32, 6);
   int status_width = 20;
   int status_right = PBL_IF_ROUND_ELSE(38, 8);
@@ -540,26 +604,11 @@ static void list_draw_row(GContext *ctx, const Layer *cell_layer, MenuIndex *cel
                             status_width, bounds.size.h);
   int right_inset = has_status ? (bounds.size.w - status_rect.origin.x + 4) :
                                  PBL_IF_ROUND_ELSE(28, 6);
+  right_inset += oc_group_count_slot_width(session->subagent_count);
 
-  // A running session shows motion even when it has an unread completion; permission and
-  // question dots still take priority because those need an answer.
-  if (session->flags & (FLAG_PERMISSION | FLAG_QUESTION)) {
-    draw_reason_dot(ctx,
-                    GPoint(status_rect.origin.x + status_rect.size.w / 2, bounds.size.h / 2),
-                    session->flags, highlighted);
-  } else if (session->flags & FLAG_RUNNING) {
-    // MenuLayer only draws rows that are on screen. A row entering during an animated scroll
-    // rearms the timer without redrawing or relayouting from the draw callback.
-    spinner_ensure();
-    GRect spinner_rect = GRect(status_rect.origin.x,
-                               (bounds.size.h - SPINNER_BOX_HEIGHT) / 2 + SPINNER_NUDGE,
-                               status_rect.size.w, SPINNER_BOX_HEIGHT);
-    draw_spinner(ctx, spinner_rect, highlighted ? foreground : muted_text(), s_spin_frame);
-  } else if (session->flags & (FLAG_ATTENTION | FLAG_UNVIEWED)) {
-    draw_reason_dot(ctx,
-                    GPoint(status_rect.origin.x + status_rect.size.w / 2, bounds.size.h / 2),
-                    session->flags, highlighted);
-  }
+  // MenuLayer draws visible rows during scroll; spinner_ensure rearms as group rows appear.
+  draw_status_indicator(ctx, session->flags, session->subagent_count, status_rect,
+                        highlighted ? foreground : muted_text(), highlighted, false);
 
   graphics_context_set_text_color(ctx, foreground);
   graphics_draw_text(ctx, session->name,
@@ -574,7 +623,8 @@ static void list_draw_row(GContext *ctx, const Layer *cell_layer, MenuIndex *cel
   }
 }
 
-static void request_detail(const char *session_id, const char *name, uint8_t flags);
+static void request_detail(const char *session_id, const char *name, uint8_t flags,
+                           uint8_t subagent_count);
 
 static void request_list_refresh(void) {
   DictionaryIterator *out;
@@ -606,7 +656,7 @@ static void list_select(MenuLayer *menu_layer, MenuIndex *cell_index, void *data
   }
   if (cell_index->row >= (uint16_t)s_session_count) return;
   Session *session = &s_sessions[cell_index->row];
-  request_detail(session->id, session->name, session->flags);
+  request_detail(session->id, session->name, session->flags, session->subagent_count);
 }
 
 static void list_select_long(MenuLayer *menu_layer, MenuIndex *cell_index, void *data) {
@@ -903,7 +953,9 @@ static void set_detail_header(const char *title, const char *subtitle) {
 }
 
 static bool detail_status_visible(void) {
-  return (s_detail_flags & (FLAG_ATTENTION | FLAG_UNVIEWED | FLAG_RUNNING)) != 0;
+  return (s_detail_flags & (FLAG_ATTENTION | FLAG_UNVIEWED | FLAG_RUNNING |
+                            FLAG_SUBAGENTS_RUNNING)) != 0 ||
+         s_detail_subagent_count > 0;
 }
 
 static bool detail_spinner_active(void) {
@@ -913,21 +965,10 @@ static bool detail_spinner_active(void) {
 static void detail_status_update(Layer *layer, GContext *ctx) {
   if (!detail_status_visible()) return;
   GRect bounds = layer_get_bounds(layer);
-  if (s_detail_flags & (FLAG_PERMISSION | FLAG_QUESTION)) {
-    draw_reason_dot(ctx, GPoint(bounds.size.w / 2, bounds.size.h / 2),
-                    s_detail_flags, false);
-    return;
-  }
-  if (s_detail_flags & FLAG_RUNNING) {
-    spinner_ensure();
-    GRect spinner_rect = GRect(0,
-                               (bounds.size.h - SPINNER_BOX_HEIGHT) / 2 + SPINNER_NUDGE,
-                               bounds.size.w, SPINNER_BOX_HEIGHT);
-    draw_spinner(ctx, spinner_rect, GColorBlack, s_spin_frame);
-    return;
-  }
-  draw_reason_dot(ctx, GPoint(bounds.size.w / 2, bounds.size.h / 2),
-                  s_detail_flags, false);
+  int icon_x = oc_group_count_slot_width(s_detail_subagent_count);
+  GRect icon_frame = GRect(icon_x, 0, 26, bounds.size.h);
+  draw_status_indicator(ctx, s_detail_flags, s_detail_subagent_count, icon_frame,
+                        GColorBlack, false, true);
 }
 
 static void layout_detail_header(void) {
@@ -938,13 +979,17 @@ static void layout_detail_header(void) {
   int status_width = 26;
   int status_right = PBL_IF_ROUND_ELSE(34, 6);
   bool has_status = detail_status_visible();
-  int text_width = bounds.size.w - pad * 2 - (has_status ? status_width + 4 : 0);
+  int status_reserve = has_status ? status_width + 4 +
+                       oc_group_count_slot_width(s_detail_subagent_count) : 0;
+  int text_width = bounds.size.w - pad * 2 - status_reserve;
   int text_y = s_detail_header_single ? (HEADER_HEIGHT - 26) / 2 : HEADER_TOP;
   int text_height = s_detail_header_single ? 26 : HEADER_HEIGHT - HEADER_TOP;
   layer_set_frame(text_layer_get_layer(s_detail_header),
                   GRect(pad, text_y, text_width, text_height));
+  int count_reserve = oc_group_count_slot_width(s_detail_subagent_count);
   layer_set_frame(s_detail_status_layer,
-                  GRect(bounds.size.w - status_right - status_width, 0, status_width, HEADER_HEIGHT));
+                  GRect(bounds.size.w - status_right - status_width - count_reserve, 0,
+                        status_width + count_reserve, HEADER_HEIGHT));
   layer_set_hidden(s_detail_status_layer, !has_status);
   layer_mark_dirty(s_detail_status_layer);
 }
@@ -1786,6 +1831,7 @@ static void detail_window_load(Window *window) {
 
 static void detail_window_unload(Window *window) {
   s_detail_open = false;
+  s_detail_subagent_count = 0;
   s_send_pending = false;
   s_prompt_uploading = false;
 #ifndef PBL_PLATFORM_APLITE
@@ -1832,10 +1878,12 @@ static void detail_window_unload(Window *window) {
   s_choice_menu = NULL;
 }
 
-static void request_detail(const char *session_id, const char *name, uint8_t flags) {
+static void request_detail(const char *session_id, const char *name, uint8_t flags,
+                           uint8_t subagent_count) {
   copy_clean(s_detail_session, sizeof(s_detail_session), session_id, true);
   copy_clean(s_detail_name, sizeof(s_detail_name), name ? name : "Session", true);
   s_detail_flags = flags;
+  s_detail_subagent_count = subagent_count;
   s_reply_len = 0;
   s_reply_next = 0;
   s_reply_expected = 0;
@@ -2074,6 +2122,9 @@ static void handle_list_session(DictionaryIterator *iter) {
   copy_clean(session->name, sizeof(session->name),
              tuple_string(iter, MESSAGE_KEY_session_name, "Untitled"), true);
   session->flags = (uint8_t)tuple_int(iter, MESSAGE_KEY_session_flags, 0);
+  // Missing count on a reused incoming slot intentionally clears its stale value.
+  session->subagent_count = oc_subagent_count_value(
+      tuple_int(iter, MESSAGE_KEY_subagent_count, 0));
   if (index + 1 > s_incoming_count) s_incoming_count = index + 1;
 }
 
@@ -2179,11 +2230,15 @@ static void handle_list_end(DictionaryIterator *iter) {
   for (int i = 0; i < s_session_count; i++) {
     if (s_detail_session[0] && strcmp(s_sessions[i].id, s_detail_session) == 0) {
       s_detail_flags = s_sessions[i].flags;
+      s_detail_subagent_count = s_detail_open ? s_sessions[i].subagent_count : 0;
       detail_found = true;
       break;
     }
   }
-  if (!detail_found) s_detail_flags = 0;
+  if (!detail_found) {
+    s_detail_flags = 0;
+    s_detail_subagent_count = 0;
+  }
   if (s_detail_open) layout_detail_header();
 
   list_recalc_spinner();
