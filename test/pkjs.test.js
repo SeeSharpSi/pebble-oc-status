@@ -79,16 +79,19 @@ function harness(options = {}) {
     Pebble,
     console: { log() {} },
     localStorage: {
-      getItem(key) { return storage.has(key) ? storage.get(key) : null; },
+      getItem(key) {
+        if (options.failStorageReadKey === key) throw new Error('storage unavailable');
+        return storage.has(key) ? storage.get(key) : null;
+      },
       setItem(key, value) {
         if (options.failStorageWrites) throw new Error('storage unavailable');
         storage.set(key, String(value));
       },
       removeItem(key) { storage.delete(key); }
     },
-    setTimeout(callback) {
+    setTimeout(callback, delay) {
       const id = ++nextTimer;
-      timers.set(id, callback);
+      timers.set(id, { callback, delay });
       return id;
     },
     clearTimeout(id) { timers.delete(id); },
@@ -112,6 +115,15 @@ function harness(options = {}) {
   vm.runInNewContext(fs.readFileSync(path.join(__dirname, '..', 'src', 'pkjs', 'index.js'), 'utf8'), sandbox);
   Pebble.addEventListener('ready', handlers.ready);
   handlers.ready({});
+  function runTimerWithDelay(delay) {
+    const entry = Array.from(timers.entries()).find(([, timer]) => timer.delay === delay);
+    if (!entry) return false;
+    timers.delete(entry[0]);
+    entry[1].callback();
+    return true;
+  }
+  const savedSettings = JSON.parse((options.storage || {})['ocstatus.settings.v1'] || '{}');
+  if (!options.deferStartup && !savedSettings.poll_rate) runTimerWithDelay(1500);
 
   function fire(category, item, envelope) {
     const subscription = subscriptions.find((entry) => entry.category === category && entry.item === item);
@@ -128,7 +140,7 @@ function harness(options = {}) {
   }
 
   function runTimers() {
-    const due = Array.from(timers.values());
+    const due = Array.from(timers.values()).map((timer) => timer.callback);
     timers.clear();
     due.forEach((callback) => callback());
   }
@@ -171,7 +183,7 @@ function harness(options = {}) {
 
   return {
     Pebble, handlers, subscriptions, actions, opened, fire, watch, takeSent, sessionMessages, runTimers,
-    advanceTime, ackNext, ackAll, pendingAcks, deferredReads, resolveRead,
+    advanceTime, ackNext, ackAll, pendingAcks, deferredReads, resolveRead, runTimerWithDelay,
     setReply(envelope) { replyEnvelope = envelope; },
     setReplies(envelope) { repliesEnvelope = envelope; },
     setPermission(envelope) { permissionEnvelope = envelope; },
@@ -356,6 +368,119 @@ test('sessions merge chats and active runs with the right status indicators', ()
   assert.equal(sessions[1].flags & 1, 1, 'running spinner');
   assert.equal(sessions[2].flags & 2, 2, 'attention dot');
   assert.equal(sessions[2].flags & 4, 4, 'question');
+});
+
+test('startup subscribes to lightweight sources first and publishes names and running sessions immediately', () => {
+  const h = harness({ deferStartup: true });
+  assert.deepEqual(h.subscriptions.map((entry) => entry.item), ['configured', 'chats', 'active_session']);
+  h.fire('agent', 'chats', { instances: [chat('ses_fast', 'Fast named session')] });
+  let messages = h.takeSent();
+  assert.equal(listRows(messages)[0].session_name, 'Fast named session');
+  assert.deepEqual(h.subscriptions.map((entry) => entry.item), ['configured', 'chats', 'active_session']);
+
+  h.fire('opencode', 'active_session', { instances: [session('ses_fast', 'Fast named session')] });
+  messages = h.takeSent();
+  assert.ok(listRows(messages)[0].session_flags & 0x01, 'running flag appears before detail subscriptions');
+  assert.deepEqual(h.subscriptions.map((entry) => entry.item), [
+    'configured', 'chats', 'active_session', 'chat_status', 'question', 'replies', 'reply'
+  ]);
+});
+
+test('startup badge sources fill in after core session list publishes', () => {
+  const h = harness({ deferStartup: true });
+  h.fire('agent', 'chats', { instances: [chat('ses_badge', 'Badge session')] });
+  h.fire('opencode', 'active_session', { instances: [] });
+  assert.equal(listRows(h.takeSent()).length, 1, 'core list is available before badge source data');
+  h.fire('opencode', 'chat_status', {
+    instances: [chatStatusRow('ses_badge', 'Badge session', { reason: 'Permission', permissionCount: 1 })]
+  });
+  assert.ok(listRows(h.takeSent())[0].session_flags & 0x20, 'permission badge fills after detail phase');
+});
+
+test('startup fallback opens details when core source never responds', () => {
+  const h = harness({ deferStartup: true });
+  assert.equal(h.runTimerWithDelay(1500), true);
+  assert.deepEqual(h.subscriptions.map((entry) => entry.item), [
+    'configured', 'chats', 'active_session', 'chat_status', 'question', 'replies', 'reply'
+  ]);
+  assert.equal(h.runTimerWithDelay(1500), false, 'fallback timer cleared after opening details');
+});
+
+test('startup core errors count as settled and do not wait for fallback', () => {
+  const h = harness({ deferStartup: true });
+  h.subscriptions.find((entry) => entry.item === 'chats').onError({ code: 'PLUGIN_UNAVAILABLE' });
+  h.subscriptions.find((entry) => entry.item === 'active_session').onError({ code: 'PLUGIN_UNAVAILABLE' });
+  assert.ok(h.subscriptions.some((entry) => entry.item === 'chat_status'), 'detail phase opens on core errors');
+  assert.equal(h.runTimerWithDelay(1500), false, 'error completion clears fallback timer');
+});
+
+test('mode switch ignores stale startup callbacks and cancels delayed detail subscription', () => {
+  const h = harness({ deferStartup: true });
+  const oldChats = h.subscriptions.find((entry) => entry.item === 'chats');
+  const oldActive = h.subscriptions.find((entry) => entry.item === 'active_session');
+  h.handlers.webviewclosed({ response: encodeURIComponent(JSON.stringify({ poll_rate: 10 })) });
+  oldChats.onData({ instances: [chat('ses_stale', 'Stale session')] });
+  oldActive.onData({ instances: [session('ses_stale', 'Stale session')] });
+  assert.equal(h.subscriptions.some((entry) => entry.item === 'chat_status'), false);
+  assert.equal(listRows(h.takeSent()).some((row) => row.session_id === 'ses_stale'), false);
+});
+
+test('manual polling stages first detail reads after core and preserves later poll cadence', async () => {
+  const h = harness({
+    storage: { 'ocstatus.settings.v1': JSON.stringify({ poll_rate: 10 }) },
+    deferReads: ['chats', 'active_session']
+  });
+  assert.deepEqual(h.reads.map((read) => read.item), ['configured', 'chats', 'active_session']);
+  h.resolveRead('chats', { instances: [chat('ses_manual', 'Manual session')] });
+  await new Promise((resolve) => setImmediate(resolve));
+  assert.deepEqual(h.reads.map((read) => read.item), ['configured', 'chats', 'active_session']);
+  h.resolveRead('active_session', { instances: [session('ses_manual', 'Manual session')] });
+  await new Promise((resolve) => setImmediate(resolve));
+  assert.deepEqual(h.reads.map((read) => read.item), [
+    'configured', 'chats', 'active_session', 'chat_status', 'question'
+  ]);
+  assert.ok(listRows(h.takeSent()).some((row) => row.session_id === 'ses_manual'), 'core list publishes');
+  assert.equal(h.runTimerWithDelay(1500), false, 'core completion clears startup fallback');
+  assert.equal(h.runTimerWithDelay(10000), true, 'next poll retains configured 10-second cadence');
+  await new Promise((resolve) => setImmediate(resolve));
+  assert.deepEqual(h.reads.slice(5).map((read) => read.item), [
+    'configured', 'chats', 'active_session', 'chat_status', 'question'
+  ]);
+});
+
+test('manual first cycle waits for staged detail reads before scheduling next poll', async () => {
+  const h = harness({
+    storage: { 'ocstatus.settings.v1': JSON.stringify({ poll_rate: 10 }) },
+    deferReads: ['chat_status', 'question']
+  });
+  await new Promise((resolve) => setImmediate(resolve));
+  assert.deepEqual(h.reads.map((read) => read.item), [
+    'configured', 'chats', 'active_session', 'chat_status', 'question'
+  ]);
+  assert.equal(h.runTimerWithDelay(10000), false, 'first cycle remains pending on detail reads');
+  h.resolveRead('chat_status', { instances: [] });
+  await new Promise((resolve) => setImmediate(resolve));
+  assert.equal(h.runTimerWithDelay(10000), false, 'all staged detail reads must settle');
+  h.resolveRead('question', { instances: [] });
+  await new Promise((resolve) => setImmediate(resolve));
+  assert.equal(h.runTimerWithDelay(10000), true, 'next cycle starts at configured cadence after details');
+});
+
+test('stopped manual startup ignores late detail read results', async () => {
+  const h = harness({
+    storage: { 'ocstatus.settings.v1': JSON.stringify({ poll_rate: 10 }) },
+    deferReads: ['chat_status', 'question']
+  });
+  await new Promise((resolve) => setImmediate(resolve));
+  h.handlers.webviewclosed({ response: encodeURIComponent(JSON.stringify({ poll_rate: 0 })) });
+  h.takeSent();
+  h.resolveRead('chat_status', {
+    instances: [chatStatusRow('ses_late', 'Late permission', { reason: 'Permission', permissionCount: 1 })]
+  });
+  h.resolveRead('question', { instances: [] });
+  await new Promise((resolve) => setImmediate(resolve));
+  assert.equal(listRows(h.takeSent()).some((row) => row.session_id === 'ses_late'), false,
+    'old generation detail cannot publish after mode switch');
 });
 
 test('subagent setting defaults to Show, falls back on invalid values, persists, and injects', () => {
@@ -1489,6 +1614,7 @@ test('a retired plugin source resubscribes after a delay', () => {
   });
   assert.ok(h.subscriptions.length > 0, 'no immediate restart');
   h.runTimers();
+  h.runTimerWithDelay(1500);
   assert.ok(h.subscriptions.some((entry) => entry.item === 'replies'), 'subscriptions restored');
 });
 
@@ -1890,6 +2016,25 @@ test('manual polling reads recent replies at most once a minute only when opted 
   h.runTimers();
   await new Promise((resolve) => setImmediate(resolve));
   assert.equal(h.reads.filter((request) => request.item === 'replies').length, 1);
+});
+
+test('manual poll alert-setting read failure skips replies without blocking poll completion', async () => {
+  const h = harness({
+    plugins: [bundledPlugin()],
+    storage: { 'ocstatus.replyAlerts.enabled.v1': '1' },
+    failStorageReadKey: 'ocstatus.replyAlerts.enabled.v1'
+  });
+  h.setSource('configured', { instances: [] });
+  h.setSource('chats', { instances: [] });
+  h.setSource('active_session', { instances: [] });
+  h.setSource('chat_status', { instances: [] });
+  h.setSource('question', { instances: [] });
+  h.handlers.webviewclosed({ response: encodeURIComponent(JSON.stringify({ poll_rate: 10 })) });
+  await new Promise((resolve) => setImmediate(resolve));
+  assert.ok(h.reads.some((request) => request.item === 'chat_status'));
+  assert.ok(h.reads.some((request) => request.item === 'question'));
+  assert.equal(h.reads.some((request) => request.item === 'replies'), false);
+  assert.equal(h.runTimerWithDelay(10000), true, 'poll completion schedules next cycle');
 });
 
 test('manual polling does not read recent replies by default or for the legacy UUID', async () => {

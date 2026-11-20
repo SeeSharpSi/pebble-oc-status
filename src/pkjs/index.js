@@ -28,6 +28,7 @@ var KNOWN_LIMIT = 40;
 var KNOWN_MAX_AGE_SEC = 12 * 60 * 60;
 var SOURCE_READ_TIMEOUT_MS = 25000;
 var SOURCE_READ_CACHE_MS = 10000;
+var STARTUP_DETAIL_FALLBACK_MS = 1500;
 var MAX_CANNED_REPLIES = 8;
 var CANNED_REPLY_MAX_LEN = 80;
 var DEFAULT_CANNED_REPLIES = ['Continue', 'Yes', 'No', 'Run tests'];
@@ -84,6 +85,9 @@ var state = {
   suppressUnviewedUntil: {},
   subscriptions: [],
   subscribed: false,
+  subscriptionGeneration: 0,
+  cancelSubscriptionStartup: null,
+  cancelPollStartup: null,
   pollRateSec: SAVED_POLL_RATE,
   onlyAction: !!SAVED_SETTINGS.only_action,
   subagentsMode: SAVED_SUBAGENTS,
@@ -2221,6 +2225,8 @@ function scheduleResubscribe() {
 }
 
 function stopSubscriptions() {
+  state.subscriptionGeneration += 1;
+  if (state.cancelSubscriptionStartup) state.cancelSubscriptionStartup();
   state.subscriptions.forEach(function (subscription) {
     try {
       if (subscription && typeof subscription.unsubscribe === 'function') subscription.unsubscribe();
@@ -2234,6 +2240,7 @@ function stopSubscriptions() {
 
 function stopPolling() {
   state.pollGeneration += 1;
+  if (state.cancelPollStartup) state.cancelPollStartup();
   if (state.pollTimer) {
     clearTimeout(state.pollTimer);
     state.pollTimer = null;
@@ -2241,13 +2248,67 @@ function stopPolling() {
   state.polling = false;
 }
 
-function pollRead(category, item, key, handler) {
+function pollRead(category, item, key, handler, generation) {
   return readSourceOnce(category, item, { maxAgeMs: 0 }).then(function (envelope) {
+    if (state.pollGeneration !== generation) return;
     state.errors[key] = null;
     handler(envelope);
   }).catch(function (error) {
+    if (state.pollGeneration !== generation) return;
     state.errors[key] = errorCode(error);
     log(key + ' poll error: ' + errorCode(error));
+  });
+}
+
+function pollDetailReads(generation) {
+  var reads = [
+    pollRead('opencode', 'chat_status', 'chatStatus', onChatStatus, generation),
+    pollRead('opencode', 'question', 'question', onQuestions, generation)
+  ];
+  var replyAlertsEnabled = false;
+  try {
+    replyAlertsEnabled = isBundledContext() &&
+      localStorage.getItem(KEY_REPLY_ALERTS_ENABLED) === '1';
+  } catch (e) {
+    replyAlertsEnabled = false;
+  }
+  if (replyAlertsEnabled &&
+      (state.replyAlertsLastReadAt === 0 ||
+       Date.now() - state.replyAlertsLastReadAt >= REPLY_ALERTS_MIN_INTERVAL_MS)) {
+    state.replyAlertsLastReadAt = Date.now();
+    reads.push(pollRead('opencode', 'replies', 'replies', onReplies, generation));
+  }
+  return Promise.all(reads);
+}
+
+function pollStartupGate(generation, coreReads) {
+  return new Promise(function (resolve) {
+    var settled = false;
+    var detailsStarted = false;
+    var timer = null;
+    function clearTimer() {
+      if (!timer) return;
+      clearTimeout(timer);
+      timer = null;
+    }
+    function finish() {
+      if (settled) return;
+      settled = true;
+      clearTimer();
+      if (state.cancelPollStartup === cancel) state.cancelPollStartup = null;
+      resolve();
+    }
+    function openDetails() {
+      if (settled || detailsStarted) return;
+      detailsStarted = true;
+      clearTimer();
+      if (state.pollGeneration !== generation) return finish();
+      pollDetailReads(generation).then(finish);
+    }
+    function cancel() { finish(); }
+    state.cancelPollStartup = cancel;
+    timer = setTimeout(openDetails, STARTUP_DETAIL_FALLBACK_MS);
+    Promise.all(coreReads).then(openDetails);
   });
 }
 
@@ -2255,32 +2316,22 @@ function schedulePoll(generation) {
   if (state.pollGeneration !== generation || state.pollRateSec <= 0 || !state.installed) return;
   state.pollTimer = setTimeout(function () {
     state.pollTimer = null;
-    pollSources();
+    pollSources(false);
   }, state.pollRateSec * 1000);
 }
 
-function pollSources() {
+function pollSources(firstStage) {
   if (state.pollRateSec <= 0 || !state.installed || state.polling) return;
   var generation = state.pollGeneration;
   state.polling = true;
-  var reads = [
-    pollRead('agent', 'configured', 'configured', onConfigured),
-    pollRead('agent', 'chats', 'chats', onChats),
-    pollRead('opencode', 'active_session', 'active', onActive),
-    pollRead('opencode', 'chat_status', 'chatStatus', onChatStatus),
-    pollRead('opencode', 'question', 'question', onQuestions)
+  var coreReads = [
+    pollRead('agent', 'configured', 'configured', onConfigured, generation),
+    pollRead('agent', 'chats', 'chats', onChats, generation),
+    pollRead('opencode', 'active_session', 'active', onActive, generation)
   ];
-  // Manual polling normally leaves recent replies to the detail read. The combined app can
-  // opt in to one bounded replies refresh per minute for reply alerts.
-  if (isBundledContext() && localStorage.getItem(KEY_REPLY_ALERTS_ENABLED) === '1' &&
-      (state.replyAlertsLastReadAt === 0 ||
-       Date.now() - state.replyAlertsLastReadAt >= REPLY_ALERTS_MIN_INTERVAL_MS)) {
-    state.replyAlertsLastReadAt = Date.now();
-    reads.push(pollRead('opencode', 'replies', 'replies', function (envelope) {
-      onReplies(envelope);
-    }));
-  }
-  Promise.all(reads).then(function () {
+  var detailReads = firstStage ?
+    pollStartupGate(generation, [coreReads[1], coreReads[2]]) : pollDetailReads(generation);
+  Promise.all(coreReads.concat([detailReads])).then(function () {
     if (state.pollGeneration !== generation) return;
     state.polling = false;
     // A regular poll that changes nothing stays silent. A bounded heartbeat still sends a full
@@ -2300,7 +2351,7 @@ function applyPollingMode() {
     cancelResubscribe();
     stopSubscriptions();
     stopPolling();
-    if (state.installed) pollSources();
+    if (state.installed) pollSources(true);
   } else {
     stopPolling();
     cancelResubscribe();
@@ -2369,43 +2420,78 @@ function applySettings(options) {
   return saved;
 }
 
-function subscribeSource(category, item, key, onData) {
+function subscribeSource(category, item, key, onData, generation, settled) {
   try {
     state.subscriptions.push(Pebble.subscribeToSource({
       plugin: activePluginUuid,
       category: category,
       item: item,
       onData: function (envelope) {
+        if (state.subscriptionGeneration !== generation || !state.subscribed) return;
         state.errors[key] = null;
         cancelResubscribe();
         onData(envelope);
+        if (settled) settled();
       },
       onError: function (error) {
+        if (state.subscriptionGeneration !== generation || !state.subscribed) return;
         state.errors[key] = errorCode(error);
         log(key + ' error: ' + errorCode(error) + ' ' + (error && error.message ? error.message : ''));
         if (isRetiredError(error)) scheduleResubscribe();
         rebuild();
+        if (settled) settled();
       }
     }));
   } catch (e) {
+    if (state.subscriptionGeneration !== generation) return;
     state.errors[key] = errorCode(e);
     log(key + ' subscribe threw: ' + e);
+    if (settled) settled();
   }
 }
 
 function startSubscriptions() {
   if (state.subscribed) return;
   state.subscribed = true;
-  subscribeSource('agent', 'configured', 'configured', onConfigured);
-  subscribeSource('agent', 'chats', 'chats', onChats);
-  subscribeSource('opencode', 'active_session', 'active', onActive);
-  subscribeSource('opencode', 'chat_status', 'chatStatus', onChatStatus);
-  subscribeSource('opencode', 'question', 'question', onQuestions);
-  subscribeSource('opencode', 'replies', 'replies', onReplies);
-  subscribeSource('opencode', 'reply', 'reply', function (envelope) {
-    applyReply(envelope, false);
-    rebuild();
-  });
+  var generation = state.subscriptionGeneration;
+  var opened = false;
+  var coreSettled = {};
+  var timer = null;
+  function clearStartupTimer() {
+    if (timer) {
+      clearTimeout(timer);
+      timer = null;
+    }
+    if (state.cancelSubscriptionStartup === cancel) state.cancelSubscriptionStartup = null;
+  }
+  function openDetails() {
+    if (opened || state.subscriptionGeneration !== generation ||
+        state.pollRateSec > 0 || !state.subscribed) return;
+    opened = true;
+    clearStartupTimer();
+    subscribeSource('opencode', 'chat_status', 'chatStatus', onChatStatus, generation);
+    subscribeSource('opencode', 'question', 'question', onQuestions, generation);
+    subscribeSource('opencode', 'replies', 'replies', onReplies, generation);
+    subscribeSource('opencode', 'reply', 'reply', function (envelope) {
+      applyReply(envelope, false);
+      rebuild();
+    }, generation);
+  }
+  function cancel() { clearStartupTimer(); }
+  function settleCore(key) {
+    if (opened || state.subscriptionGeneration !== generation) return;
+    coreSettled[key] = true;
+    if (coreSettled.chats && coreSettled.active) openDetails();
+  }
+  timer = setTimeout(function () {
+    timer = null;
+    if (state.cancelSubscriptionStartup === cancel) state.cancelSubscriptionStartup = null;
+    openDetails();
+  }, STARTUP_DETAIL_FALLBACK_MS);
+  state.cancelSubscriptionStartup = cancel;
+  subscribeSource('agent', 'configured', 'configured', onConfigured, generation);
+  subscribeSource('agent', 'chats', 'chats', onChats, generation, function () { settleCore('chats'); });
+  subscribeSource('opencode', 'active_session', 'active', onActive, generation, function () { settleCore('active'); });
 }
 
 function ensurePlugin() {
