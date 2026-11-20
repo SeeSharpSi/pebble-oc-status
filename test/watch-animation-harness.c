@@ -111,6 +111,16 @@ static void test_capability_values(void) {
 #endif
 }
 
+static void test_open_reply_startup_hello_and_retry_exhaustion(void) {
+  assert(oc_open_reply_hello_action(false, true) == OC_OPEN_REPLY_HELLO_NORMAL);
+  assert(oc_open_reply_hello_action(false, false) == OC_OPEN_REPLY_HELLO_NORMAL);
+  assert(oc_open_reply_hello_action(true, false) == OC_OPEN_REPLY_HELLO_SKIP);
+  assert(oc_open_reply_hello_action(true, true) == OC_OPEN_REPLY_HELLO_TOKEN_ONLY);
+  assert(!oc_open_reply_retries_exhausted(0));
+  assert(!oc_open_reply_retries_exhausted(OPEN_REPLY_MAX_ATTEMPTS - 1));
+  assert(oc_open_reply_retries_exhausted(OPEN_REPLY_MAX_ATTEMPTS));
+}
+
 static void test_subagent_count_and_layout(void) {
   char text[4];
   assert(oc_clamp_subagent_count(-7) == 0);
@@ -148,6 +158,7 @@ int main(void) {
   test_visible_ranges_and_flags();
   test_marquee_cache_and_visibility();
   test_capability_values();
+  test_open_reply_startup_hello_and_retry_exhaustion();
   test_subagent_count_and_layout();
   puts("watch animation harness passed");
   return 0;

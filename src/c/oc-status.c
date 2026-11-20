@@ -52,6 +52,21 @@
 #define OPEN_REPLY_RETRY_MS 4000
 #define OPEN_REPLY_MAX_ATTEMPTS 3
 
+typedef enum {
+  OC_OPEN_REPLY_HELLO_SKIP,
+  OC_OPEN_REPLY_HELLO_NORMAL,
+  OC_OPEN_REPLY_HELLO_TOKEN_ONLY
+} OcOpenReplyHelloAction;
+
+static OcOpenReplyHelloAction oc_open_reply_hello_action(bool have_list, bool pending) {
+  if (have_list) return pending ? OC_OPEN_REPLY_HELLO_TOKEN_ONLY : OC_OPEN_REPLY_HELLO_SKIP;
+  return OC_OPEN_REPLY_HELLO_NORMAL;
+}
+
+static bool oc_open_reply_retries_exhausted(int attempts) {
+  return attempts >= OPEN_REPLY_MAX_ATTEMPTS;
+}
+
 #define FLAG_RUNNING 0x01
 #define FLAG_ATTENTION 0x02
 #define FLAG_QUESTION 0x04
@@ -282,6 +297,8 @@ static AppTimer *s_open_reply_timer;
 static bool s_open_reply_pending;
 static uint32_t s_open_reply_token;
 static int s_open_reply_attempts;
+static bool s_open_reply_notice;
+static char s_open_reply_notice_text[48];
 static bool s_app_focused = true;
 static GFont s_braille_font;
 
@@ -633,6 +650,8 @@ static void list_draw_row(GContext *ctx, const Layer *cell_layer, MenuIndex *cel
 
 static void request_detail(const char *session_id, const char *name, uint8_t flags,
                            uint8_t subagent_count);
+static void open_reply_clear(void);
+static void open_reply_clear_notice(void);
 
 static void request_list_refresh(void) {
   DictionaryIterator *out;
@@ -658,6 +677,8 @@ static void write_protocol_capabilities(DictionaryIterator *out) {
 }
 
 static void list_select(MenuLayer *menu_layer, MenuIndex *cell_index, void *data) {
+  open_reply_clear();
+  open_reply_clear_notice();
   if (s_session_count == 0) {
     request_list_refresh();
     return;
@@ -668,6 +689,8 @@ static void list_select(MenuLayer *menu_layer, MenuIndex *cell_index, void *data
 }
 
 static void list_select_long(MenuLayer *menu_layer, MenuIndex *cell_index, void *data) {
+  open_reply_clear();
+  open_reply_clear_notice();
   if (s_session_count == 0 || cell_index->row >= (uint16_t)s_session_count) {
     request_list_refresh();
     return;
@@ -704,7 +727,8 @@ static void footer_update(Layer *layer, GContext *ctx) {
   graphics_context_set_stroke_color(ctx, line_color());
   graphics_draw_line(ctx, GPoint(0, 0), GPoint(bounds.size.w, 0));
   graphics_context_set_text_color(ctx, muted_text());
-  graphics_draw_text(ctx, s_status_text, fonts_get_system_font(FONT_KEY_GOTHIC_14),
+  const char *status = s_open_reply_notice ? s_open_reply_notice_text : s_status_text;
+  graphics_draw_text(ctx, status, fonts_get_system_font(FONT_KEY_GOTHIC_14),
                      GRect(4, 1, bounds.size.w - 8, 16),
                      GTextOverflowModeTrailingEllipsis, GTextAlignmentCenter, NULL);
 }
@@ -2264,6 +2288,21 @@ static void open_reply_clear(void) {
   }
 }
 
+static void open_reply_clear_notice(void) {
+  s_open_reply_notice = false;
+  s_open_reply_notice_text[0] = '\0';
+  if (s_footer_layer) layer_mark_dirty(s_footer_layer);
+}
+
+static void open_reply_show_notice(const char *text) {
+  if (s_detail_open || !s_list_window ||
+      window_stack_get_top_window() != s_list_window) return;
+  copy_clean(s_open_reply_notice_text, sizeof(s_open_reply_notice_text),
+             text && text[0] ? text : "Open link unavailable", true);
+  s_open_reply_notice = true;
+  if (s_footer_layer) layer_mark_dirty(s_footer_layer);
+}
+
 static void open_reply_send_request(void) {
   if (!s_open_reply_pending) return;
   DictionaryIterator *out;
@@ -2276,8 +2315,9 @@ static void open_reply_send_request(void) {
 static void open_reply_timeout(void *data) {
   s_open_reply_timer = NULL;
   if (!s_open_reply_pending) return;
-  if (s_open_reply_attempts >= OPEN_REPLY_MAX_ATTEMPTS) {
+  if (oc_open_reply_retries_exhausted(s_open_reply_attempts)) {
     open_reply_clear();
+    open_reply_show_notice("Open link timed out");
     return;
   }
   s_open_reply_attempts++;
@@ -2289,7 +2329,10 @@ static void open_reply_start(void) {
   if (launch_reason() != APP_LAUNCH_TIMELINE_ACTION) return;
   uint32_t token = launch_get_args();
   // openWatchApp passes a positive signed 31-bit value. Zero and the sign bit mean no route.
-  if (token == 0 || token > OPEN_REPLY_TOKEN_MAX) return;
+  if (token == 0 || token > OPEN_REPLY_TOKEN_MAX) {
+    open_reply_show_notice("Open link unavailable");
+    return;
+  }
   s_open_reply_pending = true;
   s_open_reply_token = token;
   s_open_reply_attempts = 0;
@@ -2318,9 +2361,15 @@ static void handle_open_reply_response(DictionaryIterator *iter) {
   const char *session_id = tuple_string(iter, MESSAGE_KEY_session_id, "");
   bool route = session_id && session_id[0] && !s_detail_open &&
                window_stack_get_top_window() == s_list_window;
+  const char *status = tuple_string(iter, MESSAGE_KEY_status_text, "Open link unavailable");
   // A response only answers this launch once. Never replace a detail the user already opened.
   open_reply_clear();
-  if (route) request_detail_for_session(session_id);
+  if (route) {
+    open_reply_clear_notice();
+    request_detail_for_session(session_id);
+  } else if (!session_id || !session_id[0]) {
+    open_reply_show_notice(status);
+  }
 }
 
 static void spinner_tick(void *data) {
@@ -2646,17 +2695,25 @@ static void inbox_dropped(AppMessageResult reason, void *context) {
 
 static void send_hello(void *data) {
   s_connect_timer = NULL;
-  if (s_have_list) return;
+  OcOpenReplyHelloAction action = oc_open_reply_hello_action(s_have_list,
+                                                              s_open_reply_pending);
+  if (action == OC_OPEN_REPLY_HELLO_SKIP) return;
   DictionaryIterator *out;
   if (app_message_outbox_begin(&out) == APP_MSG_OK) {
-    dict_write_uint8(out, MESSAGE_KEY_req, 2);
-    if (s_open_reply_pending) {
+    if (action == OC_OPEN_REPLY_HELLO_TOKEN_ONLY) {
       dict_write_int32(out, MESSAGE_KEY_open_reply, (int32_t)s_open_reply_token);
+    } else {
+      dict_write_uint8(out, MESSAGE_KEY_req, 2);
+      if (s_open_reply_pending) {
+        dict_write_int32(out, MESSAGE_KEY_open_reply, (int32_t)s_open_reply_token);
+      }
+      write_protocol_capabilities(out);
     }
-    write_protocol_capabilities(out);
     app_message_outbox_send();
   }
-  s_connect_timer = app_timer_register(3000, send_hello, NULL);
+  if (action == OC_OPEN_REPLY_HELLO_NORMAL) {
+    s_connect_timer = app_timer_register(3000, send_hello, NULL);
+  }
 }
 
 // ---------------------------------------------------------------- app lifecycle

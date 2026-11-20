@@ -385,13 +385,35 @@ function resolveReplyLaunch(token) {
 function respondOpenReply(token, sessionId) {
   var message = { open_reply: token };
   if (sessionId) message.session_id = sessionId;
-  enqueue(message);
+  else message.status_text = 'Open link unavailable';
+  enqueueOpenReply(message);
+}
+
+function enqueueOpenReply(message) {
+  var token = message.open_reply;
+  if (sendQueue.some(function (queued) {
+    return queued.open_reply === token;
+  })) return;
+  var firstList = -1;
+  for (var j = 0; j < sendQueue.length; j++) {
+    if (isListMessage(sendQueue[j])) {
+      firstList = j;
+      break;
+    }
+  }
+  if (firstList < 0) {
+    sendQueue.push(message);
+  } else {
+    sendQueue.splice(firstList, 0, message);
+  }
+  pump();
 }
 
 function handleOpenReply(token) {
   var number = Number(token);
   if (!isFinite(number) || Math.floor(number) !== number || number <= 0 ||
       number > 0x7fffffff) return;
+  ensurePlugin();
   respondOpenReply(number, resolveReplyLaunch(number));
 }
 

@@ -1854,6 +1854,37 @@ test('open_reply routes a valid, unexpired token in the combined app', () => {
   assert.ok(response);
   assert.equal(response.open_reply, token);
   assert.equal(response.session_id, 'ses_launch');
+  assert.equal(response.status_text, undefined);
+});
+
+test('open_reply response precedes queued list frames without interrupting in-flight send', () => {
+  const token = 654321;
+  const h = harness({
+    plugins: [bundledPlugin()],
+    now: 1700000000000,
+    storage: openReplyStorage(token, 'ses_launch', 1700000060000),
+    deferAcks: true
+  });
+  assert.equal(h.pendingAcks.length, 1, 'initial list frame is in flight');
+  const first = h.takeSent()[0];
+  assert.equal(first.list_begin, 1);
+
+  h.watch({ open_reply: token });
+  assert.equal(h.pendingAcks.length, 1, 'route does not interrupt in-flight BLE message');
+  assert.deepEqual(h.takeSent(), [], 'priority waits for current acknowledgement');
+
+  h.ackNext();
+  let next = h.takeSent();
+  assert.equal(next.length, 1);
+  assert.equal(next[0].open_reply, token, 'route jumps ahead of unsent list frames');
+  assert.equal(next[0].session_id, 'ses_launch');
+
+  const drained = [];
+  while (h.pendingAcks.length) {
+    h.ackNext();
+    drained.push(...h.takeSent());
+  }
+  assert.ok(drained.some((message) => message.list_end), 'queued list data remains intact');
 });
 
 test('valid open_reply route followed by detail_req reads reply for routed session', async () => {
@@ -1877,6 +1908,14 @@ test('valid open_reply route followed by detail_req reads reply for routed sessi
 
 test('open_reply rejects expired and malformed entries', () => {
   const token = 222;
+  const missing = harness({ plugins: [bundledPlugin()] });
+  missing.takeSent();
+  missing.watch({ open_reply: token });
+  let response = missing.takeSent().find((message) => message.open_reply !== undefined);
+  assert.ok(response);
+  assert.equal(response.session_id, undefined);
+  assert.equal(response.status_text, 'Open link unavailable');
+
   const expired = harness({
     plugins: [bundledPlugin()],
     now: 1700000000000,
@@ -1884,10 +1923,11 @@ test('open_reply rejects expired and malformed entries', () => {
   });
   expired.takeSent();
   expired.watch({ open_reply: token });
-  let response = expired.takeSent().find((message) => message.open_reply !== undefined);
+  response = expired.takeSent().find((message) => message.open_reply !== undefined);
   assert.ok(response);
   assert.equal(response.open_reply, token);
   assert.equal(response.session_id, undefined);
+  assert.equal(response.status_text, 'Open link unavailable');
 
   const nonNumericExpiry = harness({
     plugins: [bundledPlugin()],
@@ -1898,6 +1938,7 @@ test('open_reply rejects expired and malformed entries', () => {
   nonNumericExpiry.watch({ open_reply: token });
   response = nonNumericExpiry.takeSent().find((message) => message.open_reply !== undefined);
   assert.equal(response.session_id, undefined);
+  assert.equal(response.status_text, 'Open link unavailable');
 
   const malformed = harness({
     plugins: [bundledPlugin()],
@@ -1913,6 +1954,7 @@ test('open_reply rejects expired and malformed entries', () => {
   response = malformed.takeSent().find((message) => message.open_reply !== undefined);
   assert.ok(response);
   assert.equal(response.session_id, undefined);
+  assert.equal(response.status_text, 'Open link unavailable');
 });
 
 test('open_reply does not resolve the shared token outside the combined app', () => {
@@ -1927,6 +1969,7 @@ test('open_reply does not resolve the shared token outside the combined app', ()
   assert.ok(response);
   assert.equal(response.open_reply, token);
   assert.equal(response.session_id, undefined);
+  assert.equal(response.status_text, 'Open link unavailable');
 });
 
 test('configmessage returns and saves sanitized settings without cross-setting changes', () => {
