@@ -99,17 +99,22 @@ function injectStatusSettings(html) {
   if (!html.includes('</body>')) fail('plugin config page has no </body>');
 
   const css = `
-    /* OC Status watch preferences, generated with the combined config page. */
-    .ocstatus-choices { display:grid; gap:8px; margin:0 0 14px; }
-    .ocstatus-choice { display:flex; gap:10px; align-items:flex-start; padding:9px 11px; border:1px solid var(--line); border-radius:8px; cursor:pointer; }
-    .ocstatus-choice:has(input:checked) { border-color:var(--accent); background:color-mix(in srgb, var(--accent) 9%, var(--panel)); }
-    .ocstatus-choice span { display:block; }
-    .ocstatus-choice strong { display:block; font-weight:600; }
-    .ocstatus-choice small { display:block; color:var(--muted); font-size:.85rem; line-height:1.35; }
+    /* OC Status watch preferences, styled to match the shared OpenCode settings page. */
+    .ocstatus-choices { display:grid; grid-template-columns:repeat(2,minmax(0,1fr)); gap:10px; margin:0 0 14px; }
+    .ocstatus-choice { display:flex; gap:11px; align-items:flex-start; min-height:64px; padding:13px 14px; border:1px solid var(--line); border-radius:11px; background:color-mix(in srgb,var(--wash) 35%,var(--panel)); cursor:pointer; -webkit-tap-highlight-color:transparent; touch-action:manipulation; }
+    .ocstatus-choice:hover { border-color:color-mix(in srgb,var(--accent) 55%,var(--line)); }
+    .ocstatus-choice:has(input:checked) { border-color:var(--accent); background:color-mix(in srgb,var(--accent) 9%,var(--panel)); box-shadow:0 0 0 1px color-mix(in srgb,var(--accent) 18%,transparent); }
+    .ocstatus-choice:focus-within { outline:3px solid color-mix(in srgb,var(--accent) 48%,transparent); outline-offset:2px; }
+    .ocstatus-choice input[type=radio], .ocstatus-choice input[type=checkbox] { width:19px; height:19px; flex:none; margin:3px 0 0; accent-color:var(--accent); }
+    .ocstatus-choice span { display:block; min-width:0; }
+    .ocstatus-choice strong { display:block; font-weight:620; line-height:1.3; }
+    .ocstatus-choice small { display:block; margin-top:3px; color:var(--muted); font-size:.84rem; line-height:1.4; }
     .ocstatus-fieldset { border:0; padding:0; margin:0; min-width:0; }
-    .ocstatus-subsection { margin-top:18px; }
-    .ocstatus-subsection h3 { margin:0 0 4px; font-size:1rem; }
+    .ocstatus-subsection { margin-top:23px; }
+    .ocstatus-subsection h3 { display:flex; align-items:center; gap:9px; margin:0 0 7px; font-size:1rem; line-height:1.3; letter-spacing:-.01em; }
+    .ocstatus-subsection h3::before { width:3px; height:1.05em; flex:none; border-radius:8px; background:var(--accent); content:""; }
     .ocstatus-canned { min-height:118px; font-family:ui-monospace, "SFMono-Regular", Menlo, Consolas, monospace; }
+    @media(max-width:620px) { .ocstatus-choices { grid-template-columns:minmax(0,1fr); gap:8px; } .ocstatus-choice { min-height:58px; padding:12px 13px; } }
   `;
 
   const section = `  <section id="ocstatusPreferences" class="card" aria-labelledby="ocstatusHeading">
@@ -338,6 +343,7 @@ function injectStatusSettings(html) {
   }
   output = output.replace('</body>', statusScript + '\n</body>');
   output = output.replace('<title>OpenCode settings</title>', '<title>OpenCode Status settings</title>');
+  output = output.replace('<h1>OpenCode settings</h1>', '<h1>OpenCode Status settings</h1>');
   output = output.replace(
     /if\s*\(\s*event\.target\s*!==\s*['"]plugin['"]\s*\|\|\s*state\.ready\s*\)\s*return;/,
     "var readyTarget = event && event.target;\n    if ((readyTarget && readyTarget !== 'plugin') || state.ready) return;"

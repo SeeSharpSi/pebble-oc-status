@@ -6,63 +6,80 @@
   <meta name="viewport" content="width=device-width, initial-scale=1">
   <title>OpenCode Status settings</title>
   <style>
-    :root { color-scheme: light dark; font: 15px/1.5 system-ui, sans-serif; --bg:#f5f6f8; --panel:#fff; --text:#20242b; --muted:#626b78; --line:#d9dee6; --accent:#365fc7; --danger:#a82929; }
-    @media (prefers-color-scheme: dark) { :root { --bg:#171a20; --panel:#20252d; --text:#edf0f5; --muted:#aab2bf; --line:#38414d; --accent:#9ab4ff; --danger:#ff9a9a; } }
+    :root { color-scheme:light dark; font:15px/1.55 system-ui,-apple-system,BlinkMacSystemFont,"Segoe UI",sans-serif; --bg:#f5f2ec; --panel:#fffefa; --text:#252a35; --muted:#5f6878; --line:#dedbd3; --accent:#435bd5; --accent-foreground:#fff; --danger:#a52f39; --wash:#f0eee8; --focus:#6d7ff0; }
+    @media (prefers-color-scheme:dark) { :root { --bg:#171a22; --panel:#222631; --text:#f0f1f6; --muted:#b5bac8; --line:#414653; --accent:#a7b4ff; --accent-foreground:#171a22; --danger:#ff9da5; --wash:#2a2f3b; --focus:#a7b4ff; } }
     * { box-sizing:border-box; }
-    body { margin:0; padding:clamp(16px,4vw,36px); background:var(--bg); color:var(--text); }
-    main { max-width:850px; margin:auto; }
-    h1 { margin:0 0 4px; font-size:1.7rem; }
-    h2 { margin:0 0 14px; font-size:1.15rem; }
+    body { margin:0; padding:clamp(16px,4vw,42px); background:var(--bg); color:var(--text); }
+    main { max-width:800px; margin:auto; }
+    header { padding:4px 2px 8px; }
+    .brand { display:flex; align-items:center; gap:14px; margin-bottom:12px; }
+    .mark { display:grid; width:42px; height:42px; flex:none; place-items:center; border-radius:14px; background:#435bd5; box-shadow:0 5px 14px #303e8b30; }
+    .mark svg { width:26px; height:26px; }
+    h1 { margin:0 0 3px; font-size:clamp(1.55rem,4vw,1.9rem); line-height:1.2; letter-spacing:-.035em; }
+    h2 { margin:0 0 16px; font-size:1.12rem; line-height:1.3; letter-spacing:-.015em; }
     p { margin:5px 0 14px; }
     .muted, .hint { color:var(--muted); font-size:.9rem; }
-    .warning { padding:12px 14px; border-left:4px solid #c5891b; background:color-mix(in srgb, #c5891b 10%, var(--panel)); border-radius:4px; }
-    .card { margin-top:18px; padding:20px; border:1px solid var(--line); border-radius:12px; background:var(--panel); }
+    header > p.muted { max-width:62ch; margin:0 0 18px; }
+    .warning { padding:13px 15px; border:1px solid color-mix(in srgb,#ad761b 42%,var(--line)); border-left:4px solid #ad761b; border-radius:10px; background:color-mix(in srgb,#d9a94b 12%,var(--panel)); }
+    .card { margin-top:14px; padding:clamp(17px,3vw,23px); border:1px solid var(--line); border-radius:15px; background:var(--panel); box-shadow:0 3px 12px #252a3510; }
+    .card h2 { display:flex; align-items:center; gap:10px; }
+    .card h2::before { width:4px; height:1.15em; border-radius:8px; background:var(--accent); content:""; }
     .statusline { display:flex; flex-wrap:wrap; align-items:center; gap:8px; }
-    .badge { display:inline-block; padding:2px 9px; border:1px solid var(--line); border-radius:999px; font-size:.84rem; }
-    .badge.good { border-color:#43825a; color:#317347; }
-    @media (prefers-color-scheme:dark) { .badge.good { color:#a8e1b7; } }
-    form .grid, .row { display:grid; grid-template-columns:repeat(2,minmax(0,1fr)); gap:12px; align-items:end; }
+    .badge { display:inline-flex; align-items:center; min-height:27px; padding:2px 10px; border:1px solid var(--line); border-radius:999px; background:var(--wash); font-size:.82rem; }
+    .badge.good { border-color:#43825a; color:#28683e; background:color-mix(in srgb,#62a878 12%,var(--panel)); }
+    @media (prefers-color-scheme:dark) { .badge.good { color:#b4e8bf; } }
+    form .grid, .row { display:grid; grid-template-columns:repeat(2,minmax(0,1fr)); gap:14px; align-items:end; }
     .field { min-width:0; }
-    label, legend { display:block; margin:0 0 5px; font-weight:600; }
-    input:not([type=radio]), select { width:100%; min-height:40px; padding:8px 10px; border:1px solid var(--line); border-radius:6px; background:var(--panel); color:var(--text); font:inherit; }
-    input[type=checkbox] { width:auto; min-height:auto; padding:0; accent-color:var(--accent); }
-    input[type=radio] { accent-color:var(--accent); }
-    button { min-height:38px; padding:7px 12px; border:1px solid var(--line); border-radius:6px; background:var(--panel); color:var(--text); font:inherit; cursor:pointer; }
-    button.primary { border-color:var(--accent); background:var(--accent); color:#fff; }
-    button:disabled, input:disabled, select:disabled { opacity:.55; cursor:not-allowed; }
-    button:focus-visible, input:focus-visible, select:focus-visible { outline:3px solid color-mix(in srgb, var(--accent) 55%, transparent); outline-offset:2px; }
-    .actions { display:flex; flex-wrap:wrap; gap:8px; margin-top:12px; }
-    .choice { display:flex; align-items:flex-start; gap:8px; margin:9px 0; }
-    .choice label { margin:0; font-weight:400; }
+    label, legend { display:block; margin:0 0 6px; font-weight:620; }
+    fieldset legend { margin-bottom:8px; }
+    input:not([type=radio]):not([type=checkbox]), select, textarea { width:100%; min-height:46px; padding:10px 12px; border:1px solid var(--line); border-radius:9px; background:var(--panel); color:var(--text); font:inherit; }
+    input[type=checkbox], input[type=radio] { width:18px; height:18px; flex:none; margin:3px 0 0; accent-color:var(--accent); }
+    button { min-height:44px; padding:9px 14px; border:1px solid var(--line); border-radius:9px; background:var(--panel); color:var(--text); font:inherit; font-size:.93rem; font-weight:600; line-height:1.25; cursor:pointer; }
+    button.primary { border-color:var(--accent); background:var(--accent); color:var(--accent-foreground); }
+    button:disabled, input:disabled, select:disabled, textarea:disabled { opacity:.58; cursor:not-allowed; }
+    button:focus-visible, input:focus-visible, select:focus-visible, textarea:focus-visible, summary:focus-visible { outline:3px solid color-mix(in srgb,var(--focus) 65%,transparent); outline-offset:3px; }
+    .actions { display:flex; flex-wrap:wrap; gap:9px; margin-top:12px; }
+    .choice { display:flex; align-items:flex-start; gap:10px; margin:11px 0; }
+    .choice label { min-height:40px; margin:-7px 0; padding:8px 4px; font-weight:450; }
+    details { margin-top:12px; border:1px solid var(--line); border-radius:11px; background:color-mix(in srgb,var(--wash) 55%,var(--panel)); }
+    summary { min-height:46px; padding:11px 13px; color:var(--text); font-weight:620; cursor:pointer; }
+    details[open] summary { border-bottom:1px solid var(--line); }
+    details form { padding:15px; }
+    code { padding:2px 5px; border:1px solid var(--line); border-radius:5px; background:var(--wash); color:var(--text); font-size:.92em; }
     #sessionList { list-style:none; margin:12px 0; padding:0; }
-    #sessionList li { padding:11px 0; border-top:1px solid var(--line); }
+    #sessionList li { padding:13px 0; border-top:1px solid var(--line); }
     .session-top { display:flex; flex-wrap:wrap; justify-content:space-between; gap:8px; align-items:center; }
-    .session-title { overflow-wrap:anywhere; }
-    .session-meta { margin:3px 0 0; color:var(--muted); font-size:.86rem; overflow-wrap:anywhere; }
-    .selected { color:var(--accent); font-weight:600; }
+    .session-title { overflow-wrap:anywhere; font-weight:600; }
+    .session-meta { margin:4px 0 0; color:var(--muted); font-size:.86rem; overflow-wrap:anywhere; }
+    .selected { color:var(--accent); font-weight:650; }
     [hidden] { display:none !important; }
-    #feedback { min-height:1.5em; margin:12px 0 0; }
+    #feedback { min-height:1.5em; margin:14px 3px 0; }
     #feedback.error { color:var(--danger); }
-    @media(max-width:600px) { .card { padding:16px; } form .grid, .row { grid-template-columns:1fr; } }
+    @media(max-width:620px) { body { padding:16px 13px 26px; } form .grid, .row { grid-template-columns:minmax(0,1fr); } .row > .actions { margin-top:0; } .card { border-radius:13px; } }
 
-    /* OC Status watch preferences, generated with the combined config page. */
-    .ocstatus-choices { display:grid; gap:8px; margin:0 0 14px; }
-    .ocstatus-choice { display:flex; gap:10px; align-items:flex-start; padding:9px 11px; border:1px solid var(--line); border-radius:8px; cursor:pointer; }
-    .ocstatus-choice:has(input:checked) { border-color:var(--accent); background:color-mix(in srgb, var(--accent) 9%, var(--panel)); }
-    .ocstatus-choice span { display:block; }
-    .ocstatus-choice strong { display:block; font-weight:600; }
-    .ocstatus-choice small { display:block; color:var(--muted); font-size:.85rem; line-height:1.35; }
+    /* OC Status watch preferences, styled to match the shared OpenCode settings page. */
+    .ocstatus-choices { display:grid; grid-template-columns:repeat(2,minmax(0,1fr)); gap:10px; margin:0 0 14px; }
+    .ocstatus-choice { display:flex; gap:11px; align-items:flex-start; min-height:64px; padding:13px 14px; border:1px solid var(--line); border-radius:11px; background:color-mix(in srgb,var(--wash) 35%,var(--panel)); cursor:pointer; -webkit-tap-highlight-color:transparent; touch-action:manipulation; }
+    .ocstatus-choice:hover { border-color:color-mix(in srgb,var(--accent) 55%,var(--line)); }
+    .ocstatus-choice:has(input:checked) { border-color:var(--accent); background:color-mix(in srgb,var(--accent) 9%,var(--panel)); box-shadow:0 0 0 1px color-mix(in srgb,var(--accent) 18%,transparent); }
+    .ocstatus-choice:focus-within { outline:3px solid color-mix(in srgb,var(--accent) 48%,transparent); outline-offset:2px; }
+    .ocstatus-choice input[type=radio], .ocstatus-choice input[type=checkbox] { width:19px; height:19px; flex:none; margin:3px 0 0; accent-color:var(--accent); }
+    .ocstatus-choice span { display:block; min-width:0; }
+    .ocstatus-choice strong { display:block; font-weight:620; line-height:1.3; }
+    .ocstatus-choice small { display:block; margin-top:3px; color:var(--muted); font-size:.84rem; line-height:1.4; }
     .ocstatus-fieldset { border:0; padding:0; margin:0; min-width:0; }
-    .ocstatus-subsection { margin-top:18px; }
-    .ocstatus-subsection h3 { margin:0 0 4px; font-size:1rem; }
+    .ocstatus-subsection { margin-top:23px; }
+    .ocstatus-subsection h3 { display:flex; align-items:center; gap:9px; margin:0 0 7px; font-size:1rem; line-height:1.3; letter-spacing:-.01em; }
+    .ocstatus-subsection h3::before { width:3px; height:1.05em; flex:none; border-radius:8px; background:var(--accent); content:""; }
     .ocstatus-canned { min-height:118px; font-family:ui-monospace, "SFMono-Regular", Menlo, Consolas, monospace; }
+    @media(max-width:620px) { .ocstatus-choices { grid-template-columns:minmax(0,1fr); gap:8px; } .ocstatus-choice { min-height:58px; padding:12px 13px; } }
 
   </style>
 </head>
 <body>
 <main>
   <header>
-    <h1>OpenCode settings</h1>
+    <div class="brand"><span class="mark" aria-hidden="true"><svg viewBox="0 0 32 32" fill="none"><path d="M21.7 6.7a11 11 0 1 0 4.1 12.8" stroke="white" stroke-width="3.2" stroke-linecap="round"/><path d="M17.6 6.3h7.1v7.1" stroke="white" stroke-width="3.2" stroke-linecap="round" stroke-linejoin="round"/><circle cx="13.4" cy="16" r="2.1" fill="white"/></svg></span><h1>OpenCode Status settings</h1></div>
     <p class="muted">Configure the OpenCode server and choose where Pebble sends messages.</p>
     <p class="warning"><strong>Important:</strong> Prompts may modify files or run commands through the configured agent. HTTP sends your password and pairing tokens in cleartext; use HTTPS or a trusted encrypted network.</p>
   </header>

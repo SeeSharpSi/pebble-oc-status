@@ -7,25 +7,30 @@
   <style>
     :root {
       color-scheme: light dark;
-      --background: #f4f5f7;
-      --panel: #ffffff;
-      --text: #17191c;
-      --muted: #5f6670;
-      --border: #d8dce2;
-      --accent: #145da0;
+      font: 15px/1.55 system-ui, -apple-system, BlinkMacSystemFont, "Segoe UI", sans-serif;
+      --background: #f5f2ec;
+      --panel: #fffefa;
+      --text: #252a35;
+      --muted: #5f6878;
+      --border: #dedbd3;
+      --accent: #435bd5;
       --accent-text: #ffffff;
-      --shadow: rgba(20, 30, 45, 0.12);
+      --shadow: rgba(37, 42, 53, 0.08);
+      --wash: #f0eee8;
+      --focus: #6d7ff0;
     }
     @media (prefers-color-scheme: dark) {
       :root {
-        --background: #16181c;
-        --panel: #23272e;
-        --text: #f2f4f7;
-        --muted: #aab1bb;
-        --border: #3a4049;
-        --accent: #4c9be8;
+        --background: #171a22;
+        --panel: #222631;
+        --text: #f0f1f6;
+        --muted: #b5bac8;
+        --border: #414653;
+        --accent: #a7b4ff;
         --accent-text: #08111c;
-        --shadow: rgba(0, 0, 0, 0.35);
+        --shadow: rgba(0, 0, 0, 0.24);
+        --wash: #2a2f3b;
+        --focus: #a7b4ff;
       }
     }
     * { box-sizing: border-box; }
@@ -34,136 +39,162 @@
       min-height: 100vh;
       background: var(--background);
       color: var(--text);
-      font: 16px/1.45 system-ui, -apple-system, "Segoe UI", Roboto, sans-serif;
     }
     main {
-      max-width: 620px;
+      max-width: 800px;
       margin: 0 auto;
-      padding: 20px 14px 32px;
+      padding: clamp(16px, 4vw, 42px);
     }
     header {
-      padding: 4px 2px 18px;
+      padding: 4px 2px 8px;
+      margin-bottom: 18px;
     }
+    .brand {
+      display: flex;
+      align-items: center;
+      gap: 14px;
+      margin-bottom: 12px;
+    }
+    .mark {
+      display: grid;
+      width: 42px;
+      height: 42px;
+      flex: none;
+      place-items: center;
+      border-radius: 14px;
+      background: #435bd5;
+      box-shadow: 0 5px 14px #303e8b30;
+    }
+    .mark svg { width: 26px; height: 26px; }
     h1 {
-      margin: 0 0 6px;
-      font-size: 24px;
-      line-height: 1.15;
-      letter-spacing: -0.02em;
-    }
-    header p {
       margin: 0;
-      color: var(--muted);
-      font-size: 14px;
+      font-size: clamp(1.55rem, 4vw, 1.9rem);
+      line-height: 1.2;
+      letter-spacing: -.035em;
     }
+    p { margin: 5px 0 14px; }
+    .lede, .hint { color: var(--muted); font-size: .9rem; }
+    header > .lede { max-width: 62ch; margin: 0; }
     section {
-      margin: 0 0 14px;
-      padding: 18px;
+      margin: 14px 0 0;
+      padding: clamp(17px, 3vw, 23px);
       background: var(--panel);
       border: 1px solid var(--border);
-      border-radius: 14px;
-      box-shadow: 0 1px 2px var(--shadow);
+      border-radius: 15px;
+      box-shadow: 0 3px 12px var(--shadow);
     }
     h2 {
-      margin: 0 0 4px;
-      font-size: 17px;
-      line-height: 1.25;
+      display: flex;
+      align-items: center;
+      gap: 10px;
+      margin: 0 0 8px;
+      font-size: 1.12rem;
+      line-height: 1.3;
+      letter-spacing: -.015em;
     }
-    .hint {
-      margin: 0 0 14px;
-      color: var(--muted);
-      font-size: 14px;
-    }
+    h2::before { width: 4px; height: 1.15em; flex:none; border-radius: 8px; background: var(--accent); content: ""; }
+    .hint { margin: 0 0 14px; }
     .subagents-warning { margin-top: 12px; }
     .choices {
       display: grid;
-      gap: 8px;
+      grid-template-columns: repeat(2, minmax(0, 1fr));
+      gap: 10px;
     }
     label.choice {
       display: flex;
-      gap: 10px;
+      gap: 11px;
       align-items: flex-start;
-      padding: 11px 12px;
+      min-height: 64px;
+      padding: 13px 14px;
       border: 1px solid var(--border);
-      border-radius: 10px;
+      border-radius: 11px;
+      background: color-mix(in srgb, var(--wash) 35%, var(--panel));
       cursor: pointer;
       -webkit-tap-highlight-color: transparent;
+      touch-action: manipulation;
     }
     label.choice:has(input:checked) {
       border-color: var(--accent);
       background: color-mix(in srgb, var(--accent) 9%, var(--panel));
+      box-shadow: 0 0 0 1px color-mix(in srgb, var(--accent) 18%, transparent);
     }
+    label.choice:hover { border-color: color-mix(in srgb, var(--accent) 55%, var(--border)); }
+    label.choice:focus-within { outline: 3px solid color-mix(in srgb, var(--focus) 48%, transparent); outline-offset: 2px; }
     input[type="radio"], input[type="checkbox"] {
       margin: 3px 0 0;
-      width: 18px;
-      height: 18px;
+      width: 19px;
+      height: 19px;
       accent-color: var(--accent);
       flex: none;
     }
-    .choice span {
-      display: block;
-    }
-    .choice strong {
-      display: block;
-      font-size: 15px;
-      line-height: 1.3;
-    }
-    .choice small {
-      display: block;
-      margin-top: 2px;
-      color: var(--muted);
-      font-size: 13px;
-      line-height: 1.35;
-    }
+    .choice span { display: block; min-width: 0; }
+    .choice strong { display: block; font-size: 15px; font-weight: 620; line-height: 1.3; }
+    .choice small { display: block; margin-top: 3px; color: var(--muted); font-size: .84rem; line-height: 1.4; }
     .toggle-row {
       display: flex;
-      gap: 12px;
+      gap: 11px;
       align-items: flex-start;
-      padding: 4px 0 0;
+      min-height: 64px;
+      padding: 13px 14px;
+      border: 1px solid var(--border);
+      border-radius: 11px;
+      background: color-mix(in srgb, var(--wash) 35%, var(--panel));
+      -webkit-tap-highlight-color: transparent;
+      touch-action: manipulation;
     }
     .toggle-row label {
       flex: 1;
       cursor: pointer;
+      line-height: 1.4;
     }
     textarea {
       width: 100%;
-      min-height: 128px;
-      padding: 11px 12px;
+      min-height: 118px;
+      padding: 12px 14px;
       border: 1px solid var(--border);
-      border-radius: 10px;
+      border-radius: 11px;
       background: var(--panel);
       color: var(--text);
-      font: 15px/1.4 ui-monospace, "SFMono-Regular", Menlo, Consolas, monospace;
+      font: 15px/1.45 ui-monospace, "SFMono-Regular", Menlo, Consolas, monospace;
       resize: vertical;
     }
+    textarea:focus-visible { outline: 3px solid color-mix(in srgb, var(--focus) 55%, transparent); outline-offset: 2px; }
     button {
       width: 100%;
+      min-height: 46px;
       margin-top: 20px;
-      padding: 14px 16px;
+      padding: 12px 16px;
       border: 0;
-      border-radius: 12px;
+      border-radius: 10px;
       background: var(--accent);
       color: var(--accent-text);
       font: inherit;
+      font-size: .95rem;
       font-weight: 650;
       cursor: pointer;
       -webkit-tap-highlight-color: transparent;
     }
-    button:active {
-      filter: brightness(0.94);
-    }
+    button:focus-visible { outline: 3px solid color-mix(in srgb, var(--focus) 65%, transparent); outline-offset: 3px; }
+    button:active { filter: brightness(.94); transform: scale(.99); }
     footer {
       margin-top: 14px;
       color: var(--muted);
-      font-size: 12px;
+      font-size: .8rem;
       text-align: center;
+    }
+    @media(max-width:620px) {
+      main { padding: 16px 13px 26px; }
+      .choices { grid-template-columns: minmax(0, 1fr); gap: 8px; }
+      label.choice, .toggle-row { min-height: 58px; padding: 12px 13px; }
+      section { border-radius: 13px; }
     }
   </style>
 </head>
 <body>
   <main>
     <header>
-      <h1>OpenCode Status</h1>
-      <p>Settings for the Pebble watchapp. Save, then open the app on the watch.</p>
+      <div class="brand"><span class="mark" aria-hidden="true"><svg viewBox="0 0 32 32" fill="none"><path d="M21.7 6.7a11 11 0 1 0 4.1 12.8" stroke="white" stroke-width="3.2" stroke-linecap="round"/><path d="M17.6 6.3h7.1v7.1" stroke="white" stroke-width="3.2" stroke-linecap="round" stroke-linejoin="round"/><circle cx="13.4" cy="16" r="2.1" fill="white"/></svg></span><h1>OpenCode Status</h1></div>
+      <p class="lede">Settings for the Pebble watchapp. Save, then open the app on the watch.</p>
     </header>
 
     <section aria-labelledby="polling-title">
