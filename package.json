@@ -1,14 +1,16 @@
 {
   "name": "oc-status",
   "author": "OpenCode for Pebble contributors",
-  "version": "1.7.4",
+  "version": "1.8.0",
   "keywords": [
     "pebble-app"
   ],
   "private": true,
   "scripts": {
     "test": "node --test test/*.test.js",
-    "embed-config": "node scripts/embed-config.js"
+    "embed-config": "node scripts/embed-config.js",
+    "sync-plugin": "node scripts/sync-plugin.js",
+    "check-plugin-bundle": "node scripts/sync-plugin.js --check"
   },
   "dependencies": {},
   "pebble": {
@@ -33,11 +35,18 @@
       "configurable"
     ],
     "usesPermissions": [
+      "Internet",
+      "LocalNetwork",
+      {
+        "name": "ShowNotifications",
+        "reason": "To notify you when an OpenCode reply completes",
+        "required": false
+      },
       {
         "name": "InvokeAction",
         "plugin": "4e2c758f-8a31-4bf2-a6d9-7c40ec9b5173",
-        "reason": "To answer OpenCode questions from the watch",
-        "required": true
+        "reason": "To use the separately installed OpenCode plugin when the bundled copy is unavailable",
+        "required": false
       }
     ],
     "messageKeys": [
@@ -102,7 +111,8 @@
       "canned_end",
       "reply_cap",
       "inbox_size",
-      "subagent_count"
+      "subagent_count",
+      "open_reply"
     ],
     "resources": {
       "media": [
@@ -118,7 +128,1030 @@
           "file": "fonts/braille.ttf"
         }
       ]
-    }
+    },
+    "plugin": {
+      "description": "Send messages; expose OpenCode execution, queue, shell, command, activity, replies, chat attention, permissions, questions, jobs, and session metrics; expose OpenCode Go usage only; interrupt foreground sessions.",
+      "script": "src/plugin/index.js",
+      "sources": [
+        {
+          "category": "agent",
+          "items": [
+            "chats"
+          ],
+          "properties": {
+            "name": [
+              "shortText"
+            ],
+            "title": [
+              "shortText"
+            ],
+            "url": [
+              "longText"
+            ]
+          },
+          "supportsMultiple": true,
+          "callerPermissions": [],
+          "suggestedRefreshIntervalSec": 900
+        },
+        {
+          "category": "agent",
+          "items": [
+            "configured"
+          ],
+          "properties": {
+            "name": [
+              "shortText"
+            ],
+            "configured": [
+              "boolean",
+              "shortText"
+            ]
+          },
+          "supportsMultiple": false,
+          "callerPermissions": [],
+          "suggestedRefreshIntervalSec": 60
+        },
+        {
+          "category": "opencode",
+          "items": [
+            "active_session"
+          ],
+          "properties": {
+            "name": [
+              "shortText",
+              "longText"
+            ],
+            "title": [
+              "longText"
+            ],
+            "status": [
+              "shortText",
+              "longText"
+            ],
+            "directory": [
+              "longText"
+            ],
+            "agent": [
+              "longText"
+            ],
+            "model": [
+              "longText"
+            ],
+            "updated": [
+              "timestamp"
+            ],
+            "url": [
+              "longText"
+            ],
+            "is_subagent": [
+              "boolean"
+            ],
+            "root_session_id": [
+              "longText"
+            ],
+            "parent_session_id": [
+              "longText"
+            ],
+            "outcome": [
+              "shortText",
+              "longText"
+            ],
+            "cost": [
+              "numericValue",
+              "shortText"
+            ],
+            "tokens_input": [
+              "numericValue"
+            ],
+            "tokens_output": [
+              "numericValue"
+            ],
+            "tokens_reasoning": [
+              "numericValue"
+            ],
+            "tokens_cache_read": [
+              "numericValue"
+            ],
+            "tokens_cache_write": [
+              "numericValue"
+            ]
+          },
+          "supportsMultiple": true,
+          "callerPermissions": [],
+          "suggestedRefreshIntervalSec": 20
+        },
+        {
+          "category": "opencode",
+          "items": [
+            "activity"
+          ],
+          "properties": {
+            "name": [
+              "shortText",
+              "longText"
+            ],
+            "active_count": [
+              "numericValue",
+              "shortText"
+            ],
+            "attention_count": [
+              "numericValue",
+              "shortText"
+            ],
+            "summary": [
+              "shortText",
+              "longText"
+            ],
+            "connected": [
+              "boolean"
+            ],
+            "checked_at": [
+              "timestamp"
+            ]
+          },
+          "supportsMultiple": false,
+          "callerPermissions": [],
+          "suggestedRefreshIntervalSec": 20
+        },
+        {
+          "category": "opencode",
+          "items": [
+            "reply"
+          ],
+          "properties": {
+            "name": [
+              "shortText",
+              "longText"
+            ],
+            "session_id": [
+              "longText"
+            ],
+            "message_id": [
+              "longText"
+            ],
+            "text": [
+              "shortText",
+              "longText"
+            ],
+            "updated": [
+              "timestamp"
+            ],
+            "complete": [
+              "boolean"
+            ],
+            "status": [
+              "shortText",
+              "longText"
+            ],
+            "url": [
+              "longText"
+            ],
+            "outcome": [
+              "shortText",
+              "longText"
+            ],
+            "cost": [
+              "numericValue",
+              "shortText"
+            ],
+            "tokens_input": [
+              "numericValue"
+            ],
+            "tokens_output": [
+              "numericValue"
+            ],
+            "tokens_reasoning": [
+              "numericValue"
+            ],
+            "tokens_cache_read": [
+              "numericValue"
+            ],
+            "tokens_cache_write": [
+              "numericValue"
+            ],
+            "agent": [
+              "longText"
+            ],
+            "model": [
+              "longText"
+            ]
+          },
+          "supportsMultiple": false,
+          "callerPermissions": [],
+          "suggestedRefreshIntervalSec": 20
+        },
+        {
+          "category": "opencode",
+          "items": [
+            "replies"
+          ],
+          "properties": {
+            "name": [
+              "shortText",
+              "longText"
+            ],
+            "title": [
+              "longText"
+            ],
+            "session_id": [
+              "longText"
+            ],
+            "message_id": [
+              "longText"
+            ],
+            "text": [
+              "shortText",
+              "longText"
+            ],
+            "updated": [
+              "timestamp"
+            ],
+            "complete": [
+              "boolean"
+            ],
+            "status": [
+              "shortText",
+              "longText"
+            ],
+            "is_default": [
+              "boolean"
+            ],
+            "url": [
+              "longText"
+            ],
+            "outcome": [
+              "shortText",
+              "longText"
+            ],
+            "cost": [
+              "numericValue",
+              "shortText"
+            ],
+            "tokens_input": [
+              "numericValue"
+            ],
+            "tokens_output": [
+              "numericValue"
+            ],
+            "tokens_reasoning": [
+              "numericValue"
+            ],
+            "tokens_cache_read": [
+              "numericValue"
+            ],
+            "tokens_cache_write": [
+              "numericValue"
+            ],
+            "agent": [
+              "longText"
+            ],
+            "model": [
+              "longText"
+            ]
+          },
+          "supportsMultiple": true,
+          "callerPermissions": [],
+          "suggestedRefreshIntervalSec": 60
+        },
+        {
+          "category": "opencode",
+          "items": [
+            "chat_status"
+          ],
+          "properties": {
+            "name": [
+              "shortText",
+              "longText"
+            ],
+            "title": [
+              "longText"
+            ],
+            "session_id": [
+              "longText"
+            ],
+            "message_id": [
+              "longText"
+            ],
+            "needs_action": [
+              "boolean"
+            ],
+            "reason": [
+              "shortText",
+              "longText"
+            ],
+            "permission_count": [
+              "numericValue",
+              "shortText"
+            ],
+            "question_count": [
+              "numericValue",
+              "shortText"
+            ],
+            "unread": [
+              "boolean"
+            ],
+            "updated": [
+              "timestamp"
+            ],
+            "is_default": [
+              "boolean"
+            ],
+            "is_subagent": [
+              "boolean"
+            ],
+            "url": [
+              "longText"
+            ],
+            "outcome": [
+              "shortText",
+              "longText"
+            ],
+            "cost": [
+              "numericValue",
+              "shortText"
+            ],
+            "tokens_input": [
+              "numericValue"
+            ],
+            "tokens_output": [
+              "numericValue"
+            ],
+            "tokens_reasoning": [
+              "numericValue"
+            ],
+            "tokens_cache_read": [
+              "numericValue"
+            ],
+            "tokens_cache_write": [
+              "numericValue"
+            ],
+            "agent": [
+              "longText"
+            ],
+            "model": [
+              "longText"
+            ]
+          },
+          "supportsMultiple": true,
+          "callerPermissions": [],
+          "suggestedRefreshIntervalSec": 20
+        },
+        {
+          "category": "opencode",
+          "items": [
+            "permission"
+          ],
+          "properties": {
+            "name": [
+              "shortText",
+              "longText"
+            ],
+            "title": [
+              "longText"
+            ],
+            "session_id": [
+              "longText"
+            ],
+            "request_id": [
+              "longText"
+            ],
+            "action": [
+              "shortText",
+              "longText"
+            ],
+            "resources": [
+              "longText"
+            ],
+            "message": [
+              "longText"
+            ],
+            "url": [
+              "longText"
+            ]
+          },
+          "supportsMultiple": true,
+          "callerPermissions": [],
+          "suggestedRefreshIntervalSec": 20
+        },
+        {
+          "category": "opencode",
+          "items": [
+            "question"
+          ],
+          "properties": {
+            "name": [
+              "shortText",
+              "longText"
+            ],
+            "session_id": [
+              "longText"
+            ],
+            "form_id": [
+              "longText"
+            ],
+            "question": [
+              "longText"
+            ],
+            "fields": [
+              "longText"
+            ],
+            "answerable": [
+              "boolean"
+            ],
+            "url": [
+              "longText"
+            ]
+          },
+          "supportsMultiple": true,
+          "callerPermissions": [],
+          "suggestedRefreshIntervalSec": 20
+        },
+        {
+          "category": "opencode",
+          "items": [
+            "job"
+          ],
+          "properties": {
+            "name": [
+              "shortText",
+              "longText"
+            ],
+            "job_id": [
+              "longText"
+            ],
+            "session_id": [
+              "longText"
+            ],
+            "kind": [
+              "shortText"
+            ],
+            "status": [
+              "shortText",
+              "longText"
+            ],
+            "started": [
+              "timestamp"
+            ],
+            "url": [
+              "longText"
+            ],
+            "child_session_id": [
+              "longText"
+            ]
+          },
+          "supportsMultiple": true,
+          "callerPermissions": [],
+          "suggestedRefreshIntervalSec": 20
+        },
+        {
+          "category": "opencode",
+          "items": [
+            "execution"
+          ],
+          "properties": {
+            "name": [
+              "shortText",
+              "longText"
+            ],
+            "session_id": [
+              "longText"
+            ],
+            "status": [
+              "shortText",
+              "longText"
+            ],
+            "detail": [
+              "longText"
+            ],
+            "tool": [
+              "longText"
+            ],
+            "retry_at": [
+              "timestamp"
+            ],
+            "updated": [
+              "timestamp"
+            ],
+            "url": [
+              "longText"
+            ]
+          },
+          "supportsMultiple": false,
+          "callerPermissions": [],
+          "suggestedRefreshIntervalSec": 20
+        },
+        {
+          "category": "opencode",
+          "items": [
+            "queue"
+          ],
+          "properties": {
+            "name": [
+              "shortText",
+              "longText"
+            ],
+            "session_id": [
+              "longText"
+            ],
+            "inbox_id": [
+              "longText"
+            ],
+            "kind": [
+              "shortText"
+            ],
+            "text": [
+              "shortText",
+              "longText"
+            ],
+            "delivery": [
+              "shortText"
+            ],
+            "queued_at": [
+              "timestamp"
+            ],
+            "url": [
+              "longText"
+            ]
+          },
+          "supportsMultiple": true,
+          "callerPermissions": [],
+          "suggestedRefreshIntervalSec": 20
+        },
+        {
+          "category": "opencode",
+          "items": [
+            "shell"
+          ],
+          "properties": {
+            "name": [
+              "shortText",
+              "longText"
+            ],
+            "shell_id": [
+              "longText"
+            ],
+            "command": [
+              "longText"
+            ],
+            "directory": [
+              "longText"
+            ],
+            "cwd": [
+              "longText"
+            ],
+            "status": [
+              "shortText",
+              "longText"
+            ],
+            "started": [
+              "timestamp"
+            ],
+            "completed": [
+              "timestamp"
+            ],
+            "duration": [
+              "numericValue",
+              "shortText"
+            ],
+            "exit": [
+              "numericValue"
+            ]
+          },
+          "supportsMultiple": true,
+          "callerPermissions": [],
+          "suggestedRefreshIntervalSec": 20
+        },
+        {
+          "category": "opencode",
+          "items": [
+            "command"
+          ],
+          "properties": {
+            "name": [
+              "shortText",
+              "longText"
+            ],
+            "command": [
+              "longText"
+            ],
+            "description": [
+              "longText"
+            ],
+            "directory": [
+              "longText"
+            ],
+            "session_id": [
+              "longText"
+            ]
+          },
+          "supportsMultiple": true,
+          "callerPermissions": [],
+          "suggestedRefreshIntervalSec": 300
+        },
+        {
+          "category": "opencode",
+          "items": [
+            "usage"
+          ],
+          "properties": {
+            "name": [
+              "shortText",
+              "longText"
+            ],
+            "workspace_id": [
+              "longText"
+            ],
+            "usage_url": [
+              "longText"
+            ],
+            "go_rolling_percent": [
+              "numericValue",
+              "shortText"
+            ],
+            "go_weekly_percent": [
+              "numericValue",
+              "shortText"
+            ],
+            "go_monthly_percent": [
+              "numericValue",
+              "shortText"
+            ],
+            "go_rolling_resets": [
+              "timestamp"
+            ],
+            "go_weekly_resets": [
+              "timestamp"
+            ],
+            "go_monthly_resets": [
+              "timestamp"
+            ],
+            "limited": [
+              "boolean",
+              "shortText"
+            ],
+            "status": [
+              "shortText",
+              "longText"
+            ],
+            "summary": [
+              "shortText",
+              "longText"
+            ],
+            "checked_at": [
+              "timestamp"
+            ]
+          },
+          "supportsMultiple": false,
+          "callerPermissions": [],
+          "suggestedRefreshIntervalSec": 60
+        }
+      ],
+      "actions": [
+        {
+          "name": "send_to_agent",
+          "description": "Send a message to an existing OpenCode session or start a new session in a directory. chat_id may identify a session by its ID, nickname, or unambiguous title; use \"new\" to start a session in the configured directory. Omit chat_id to follow settings: use the configured default session or start a new one. The optional delivery parameter queues the message until the current run finishes or steers it into the active run; omit it to use the plugin default. Returns a receipt for the requested delivery mode, not OpenCode's reply. Do not automatically retry uncertain delivery or conflicts.",
+          "parameters": {
+            "type": "object",
+            "properties": {
+              "message": {
+                "type": "string",
+                "minLength": 1,
+                "maxLength": 16000,
+                "description": "Message to send to OpenCode."
+              },
+              "chat_id": {
+                "type": [
+                  "string",
+                  "null"
+                ],
+                "description": "Session ID, nickname, or unambiguous title. Use \"new\" to start a session in the configured directory; omit to follow settings."
+              },
+              "delivery": {
+                "type": "string",
+                "enum": [
+                  "queue",
+                  "steer"
+                ],
+                "description": "queue waits for the current run; steer injects at the next safe turn. Omit to use the plugin setting; initial default queue."
+              }
+            },
+            "required": [
+              "message"
+            ],
+            "additionalProperties": false
+          },
+          "targets": [
+            "agent/chats"
+          ],
+          "destructive": false,
+          "requiresConfirmation": false,
+          "callerPermissions": []
+        },
+        {
+          "name": "interrupt_session",
+          "description": "Stop foreground execution in the explicitly identified OpenCode session. The virtual new target is invalid; detached jobs are not cancelled. Do not automatically retry when the result is uncertain.",
+          "parameters": {
+            "type": "object",
+            "properties": {
+              "session_id": {
+                "type": "string",
+                "pattern": "^ses[A-Za-z0-9_-]{1,160}$",
+                "description": "Explicit OpenCode session ID to interrupt."
+              }
+            },
+            "required": [
+              "session_id"
+            ],
+            "additionalProperties": false
+          },
+          "targets": [
+            "opencode/active_session",
+            "agent/chats",
+            "opencode/reply",
+            "opencode/replies"
+          ],
+          "destructive": true,
+          "requiresConfirmation": true,
+          "callerPermissions": []
+        },
+        {
+          "name": "answer_question",
+          "description": "Submit explicit choices for the identified OpenCode question after checking its actual fields. This is not permission approval; external desktop-only questions cannot be answered. Do not automatically retry when the result is uncertain.",
+          "parameters": {
+            "type": "object",
+            "properties": {
+              "session_id": {
+                "type": "string",
+                "pattern": "^ses[A-Za-z0-9_-]{1,160}$",
+                "description": "Explicit OpenCode session ID that owns the question."
+              },
+              "form_id": {
+                "type": "string",
+                "minLength": 1,
+                "maxLength": 200,
+                "description": "Form ID returned by opencode/question."
+              },
+              "answer": {
+                "type": "object",
+                "maxProperties": 50,
+                "additionalProperties": {
+                  "anyOf": [
+                    {
+                      "type": "string"
+                    },
+                    {
+                      "type": "number"
+                    },
+                    {
+                      "type": "boolean"
+                    },
+                    {
+                      "type": "array",
+                      "items": {
+                        "type": "string"
+                      }
+                    }
+                  ]
+                },
+                "description": "Explicit field-value record, bounded to 16000 JSON characters at runtime."
+              }
+            },
+            "required": [
+              "session_id",
+              "form_id",
+              "answer"
+            ],
+            "additionalProperties": false
+          },
+          "targets": [
+            "opencode/question",
+            "opencode/chat_status"
+          ],
+          "destructive": false,
+          "requiresConfirmation": true,
+          "callerPermissions": []
+        },
+        {
+          "name": "approve_permission",
+          "description": "Approve once or reject the identified OpenCode permission request after checking its operation. Permanent approval is not offered. Do not automatically retry when the result is uncertain.",
+          "parameters": {
+            "type": "object",
+            "properties": {
+              "session_id": {
+                "type": "string",
+                "pattern": "^ses[A-Za-z0-9_-]{1,160}$",
+                "description": "Explicit OpenCode session ID that owns the permission request."
+              },
+              "request_id": {
+                "type": "string",
+                "minLength": 1,
+                "maxLength": 200,
+                "description": "Permission request ID returned by opencode/permission."
+              },
+              "decision": {
+                "type": "string",
+                "enum": [
+                  "once",
+                  "reject"
+                ],
+                "default": "once",
+                "description": "Approve this request once or reject it."
+              },
+              "message": {
+                "type": "string",
+                "maxLength": 2000,
+                "description": "Optional explanation sent with the response."
+              }
+            },
+            "required": [
+              "session_id",
+              "request_id"
+            ],
+            "additionalProperties": false
+          },
+          "targets": [
+            "opencode/permission",
+            "opencode/chat_status",
+            "opencode/active_session",
+            "opencode/activity"
+          ],
+          "destructive": true,
+          "requiresConfirmation": true,
+          "callerPermissions": []
+        },
+        {
+          "name": "mark_chat_read",
+          "description": "Clear the watch-local unread marker for a chat. Pass the message ID that was read, or omit it to mark the latest reply read. This does not change desktop read state.",
+          "parameters": {
+            "type": "object",
+            "properties": {
+              "session_id": {
+                "type": "string",
+                "pattern": "^ses[A-Za-z0-9_-]{1,160}$",
+                "description": "Explicit OpenCode session ID to mark read."
+              },
+              "message_id": {
+                "type": "string",
+                "minLength": 1,
+                "maxLength": 200,
+                "description": "Message ID that was read. Omit to mark the latest reply read."
+              }
+            },
+            "required": [
+              "session_id"
+            ],
+            "additionalProperties": false
+          },
+          "targets": [
+            "opencode/chat_status"
+          ],
+          "destructive": false,
+          "requiresConfirmation": false,
+          "callerPermissions": []
+        },
+        {
+          "name": "cancel_queued_message",
+          "description": "Cancel a specific pending inbox message after revalidating it against its live session. This permanently removes the queued item. Do not retry uncertain outcomes.",
+          "parameters": {
+            "type": "object",
+            "properties": {
+              "session_id": {
+                "type": "string",
+                "pattern": "^ses[A-Za-z0-9_-]{1,160}$"
+              },
+              "inbox_id": {
+                "type": "string",
+                "minLength": 1,
+                "maxLength": 200
+              }
+            },
+            "required": [
+              "session_id",
+              "inbox_id"
+            ],
+            "additionalProperties": false
+          },
+          "targets": [
+            "opencode/queue"
+          ],
+          "destructive": true,
+          "requiresConfirmation": true,
+          "callerPermissions": []
+        },
+        {
+          "name": "set_queued_delivery",
+          "description": "Change delivery mode of a specific pending inbox message after live revalidation. Steering wakes execution and changes the active run. Do not retry uncertain outcomes.",
+          "parameters": {
+            "type": "object",
+            "properties": {
+              "session_id": {
+                "type": "string",
+                "pattern": "^ses[A-Za-z0-9_-]{1,160}$"
+              },
+              "inbox_id": {
+                "type": "string",
+                "minLength": 1,
+                "maxLength": 200
+              },
+              "delivery": {
+                "type": "string",
+                "enum": [
+                  "queue",
+                  "steer"
+                ]
+              }
+            },
+            "required": [
+              "session_id",
+              "inbox_id",
+              "delivery"
+            ],
+            "additionalProperties": false
+          },
+          "targets": [
+            "opencode/queue"
+          ],
+          "destructive": true,
+          "requiresConfirmation": true,
+          "callerPermissions": []
+        },
+        {
+          "name": "stop_shell",
+          "description": "Stop a currently running OpenCode shell by exact shell ID and owning absolute server directory. Revalidates live state before stopping; retained output is deleted. Do not retry uncertain outcomes.",
+          "parameters": {
+            "type": "object",
+            "properties": {
+              "shell_id": {
+                "type": "string",
+                "minLength": 1,
+                "maxLength": 200
+              },
+              "directory": {
+                "type": "string",
+                "minLength": 1,
+                "maxLength": 4096,
+                "description": "Absolute server path; validated by the runtime."
+              }
+            },
+            "required": [
+              "shell_id",
+              "directory"
+            ],
+            "additionalProperties": false
+          },
+          "targets": [
+            "opencode/shell"
+          ],
+          "destructive": true,
+          "requiresConfirmation": true,
+          "callerPermissions": []
+        },
+        {
+          "name": "run_command",
+          "description": "Invoke an exact registered OpenCode command in an explicit live unarchived session. Rediscover the command at its location before execution. This action exposes registered command invocation, not arbitrary shell invocation; the command may itself use tools or run shell commands under OpenCode's configured permissions. Do not retry uncertain outcomes.",
+          "parameters": {
+            "type": "object",
+            "properties": {
+              "session_id": {
+                "type": "string",
+                "pattern": "^ses[A-Za-z0-9_-]{1,160}$"
+              },
+              "command": {
+                "type": "string",
+                "minLength": 1,
+                "maxLength": 200
+              },
+              "text": {
+                "type": "string",
+                "maxLength": 16000
+              },
+              "delivery": {
+                "type": "string",
+                "enum": [
+                  "queue",
+                  "steer"
+                ]
+              }
+            },
+            "required": [
+              "session_id",
+              "command"
+            ],
+            "additionalProperties": false
+          },
+          "targets": [
+            "opencode/command",
+            "agent/chats",
+            "opencode/reply",
+            "opencode/replies"
+          ],
+          "destructive": true,
+          "requiresConfirmation": true,
+          "callerPermissions": []
+        }
+      ]
+    },
+    "configPage": "src/config.html"
   },
   "repository": "https://github.com/SeeSharpSi/pebble-oc-status"
 }

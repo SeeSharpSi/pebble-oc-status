@@ -48,6 +48,10 @@
 #endif
 #define REPLY_CAPACITY_BYTES (REPLIES_BUFFER_SIZE - 1)
 
+#define OPEN_REPLY_TOKEN_MAX 0x7fffffffU
+#define OPEN_REPLY_RETRY_MS 4000
+#define OPEN_REPLY_MAX_ATTEMPTS 3
+
 #define FLAG_RUNNING 0x01
 #define FLAG_ATTENTION 0x02
 #define FLAG_QUESTION 0x04
@@ -274,6 +278,10 @@ static char s_status_text[48] = "Connecting...";
 static int s_spin_frame;
 static AppTimer *s_spin_timer;
 static AppTimer *s_connect_timer;
+static AppTimer *s_open_reply_timer;
+static bool s_open_reply_pending;
+static uint32_t s_open_reply_token;
+static int s_open_reply_attempts;
 static bool s_app_focused = true;
 static GFont s_braille_font;
 
@@ -2246,6 +2254,75 @@ static void handle_list_end(DictionaryIterator *iter) {
   if (s_footer_layer) layer_mark_dirty(s_footer_layer);
 }
 
+static void open_reply_clear(void) {
+  s_open_reply_pending = false;
+  s_open_reply_token = 0;
+  s_open_reply_attempts = 0;
+  if (s_open_reply_timer) {
+    app_timer_cancel(s_open_reply_timer);
+    s_open_reply_timer = NULL;
+  }
+}
+
+static void open_reply_send_request(void) {
+  if (!s_open_reply_pending) return;
+  DictionaryIterator *out;
+  if (app_message_outbox_begin(&out) == APP_MSG_OK) {
+    dict_write_int32(out, MESSAGE_KEY_open_reply, (int32_t)s_open_reply_token);
+    app_message_outbox_send();
+  }
+}
+
+static void open_reply_timeout(void *data) {
+  s_open_reply_timer = NULL;
+  if (!s_open_reply_pending) return;
+  if (s_open_reply_attempts >= OPEN_REPLY_MAX_ATTEMPTS) {
+    open_reply_clear();
+    return;
+  }
+  s_open_reply_attempts++;
+  open_reply_send_request();
+  s_open_reply_timer = app_timer_register(OPEN_REPLY_RETRY_MS, open_reply_timeout, NULL);
+}
+
+static void open_reply_start(void) {
+  if (launch_reason() != APP_LAUNCH_TIMELINE_ACTION) return;
+  uint32_t token = launch_get_args();
+  // openWatchApp passes a positive signed 31-bit value. Zero and the sign bit mean no route.
+  if (token == 0 || token > OPEN_REPLY_TOKEN_MAX) return;
+  s_open_reply_pending = true;
+  s_open_reply_token = token;
+  s_open_reply_attempts = 0;
+  s_open_reply_timer = app_timer_register(OPEN_REPLY_RETRY_MS, open_reply_timeout, NULL);
+}
+
+static void request_detail_for_session(const char *session_id) {
+  const char *name = "Session";
+  uint8_t flags = 0;
+  uint8_t subagent_count = 0;
+  for (int i = 0; i < s_session_count; i++) {
+    if (strcmp(s_sessions[i].id, session_id) == 0) {
+      name = s_sessions[i].name;
+      flags = s_sessions[i].flags;
+      subagent_count = s_sessions[i].subagent_count;
+      break;
+    }
+  }
+  request_detail(session_id, name, flags, subagent_count);
+}
+
+static void handle_open_reply_response(DictionaryIterator *iter) {
+  if (!s_open_reply_pending) return;
+  int32_t token = (int32_t)tuple_int(iter, MESSAGE_KEY_open_reply, 0);
+  if (token <= 0 || (uint32_t)token != s_open_reply_token) return;
+  const char *session_id = tuple_string(iter, MESSAGE_KEY_session_id, "");
+  bool route = session_id && session_id[0] && !s_detail_open &&
+               window_stack_get_top_window() == s_list_window;
+  // A response only answers this launch once. Never replace a detail the user already opened.
+  open_reply_clear();
+  if (route) request_detail_for_session(session_id);
+}
+
 static void spinner_tick(void *data) {
   s_spin_timer = NULL;
   if (!spinner_should_run_now()) return;
@@ -2482,6 +2559,10 @@ static void handle_canned_end(DictionaryIterator *iter) {
 #endif
 
 static void inbox_received(DictionaryIterator *iter, void *context) {
+  if (tuple_present(iter, MESSAGE_KEY_open_reply)) {
+    handle_open_reply_response(iter);
+    return;
+  }
 #ifndef PBL_PLATFORM_APLITE
   if (tuple_int(iter, MESSAGE_KEY_canned_begin, 0)) {
     handle_canned_begin(iter);
@@ -2569,6 +2650,9 @@ static void send_hello(void *data) {
   DictionaryIterator *out;
   if (app_message_outbox_begin(&out) == APP_MSG_OK) {
     dict_write_uint8(out, MESSAGE_KEY_req, 2);
+    if (s_open_reply_pending) {
+      dict_write_int32(out, MESSAGE_KEY_open_reply, (int32_t)s_open_reply_token);
+    }
     write_protocol_capabilities(out);
     app_message_outbox_send();
   }
@@ -2626,6 +2710,7 @@ static void init(void) {
 #endif
 
   window_stack_push(s_list_window, false);
+  open_reply_start();
   app_timer_register(300, send_hello, NULL);
 }
 
@@ -2633,6 +2718,7 @@ static void deinit(void) {
   app_focus_service_unsubscribe();
   if (s_spin_timer) app_timer_cancel(s_spin_timer);
   if (s_connect_timer) app_timer_cancel(s_connect_timer);
+  open_reply_clear();
   if (s_result_timer) app_timer_cancel(s_result_timer);
 #ifndef PBL_PLATFORM_APLITE
   if (s_canned_timer) app_timer_cancel(s_canned_timer);

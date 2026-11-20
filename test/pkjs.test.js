@@ -7,6 +7,7 @@ const path = require('node:path');
 const vm = require('node:vm');
 
 const OPENCODE_UUID = '4e2c758f-8a31-4bf2-a6d9-7c40ec9b5173';
+const BUNDLED_OPENCODE_UUID = '67166e14-419d-42b3-9bb4-af34cc83b436';
 
 function harness(options = {}) {
   const handlers = {};
@@ -16,6 +17,7 @@ function harness(options = {}) {
   Object.keys(options.storage || {}).forEach((key) => storage.set(key, options.storage[key]));
   const actions = [];
   const opened = [];
+  const reads = [];
   const sourceEnvelopes = new Map();
   const timers = new Map();
   const pendingAcks = [];
@@ -26,10 +28,11 @@ function harness(options = {}) {
   let repliesEnvelope = options.replies || null;
   let permissionEnvelope = options.permission || null;
   let installed = options.installed !== false;
+  let plugins = options.plugins || [{ uuid: OPENCODE_UUID, name: 'OpenCode' }];
 
   const Pebble = {
     enumeratePlugins() {
-      return installed ? [{ uuid: OPENCODE_UUID, name: 'OpenCode' }] : [];
+      return installed ? plugins : [];
     },
     subscribeToSource(config) {
       subscriptions.push(config);
@@ -41,6 +44,7 @@ function harness(options = {}) {
       };
     },
     readSource(request) {
+      reads.push(request);
       if (Array.isArray(options.deferReads) && options.deferReads.includes(request.item)) {
         return new Promise((resolve, reject) => deferredReads.push({
           item: request.item, request, resolve, reject
@@ -76,7 +80,10 @@ function harness(options = {}) {
     console: { log() {} },
     localStorage: {
       getItem(key) { return storage.has(key) ? storage.get(key) : null; },
-      setItem(key, value) { storage.set(key, String(value)); },
+      setItem(key, value) {
+        if (options.failStorageWrites) throw new Error('storage unavailable');
+        storage.set(key, String(value));
+      },
       removeItem(key) { storage.delete(key); }
     },
     setTimeout(callback) {
@@ -170,6 +177,8 @@ function harness(options = {}) {
     setPermission(envelope) { permissionEnvelope = envelope; },
     setSource(item, envelope) { sourceEnvelopes.set(item, envelope); },
     setInstalled(value) { installed = value; },
+    setPlugins(value) { plugins = value; },
+    reads,
     storage
   };
 }
@@ -1655,4 +1664,245 @@ test('missing plugin sends a clear status and no subscriptions', () => {
   const messages = h.takeSent();
   const end = messages.find((message) => message.list_end);
   assert.equal(end.status_text, 'No OC plugin');
+});
+
+function bundledPlugin(sources = [
+  { category: 'agent', items: ['chats'] },
+  { category: 'opencode', items: ['replies', 'reply'] }
+]) {
+  return { uuid: BUNDLED_OPENCODE_UUID, name: 'OpenCode Status', sources };
+}
+
+function openReplyStorage(token, sessionId, expiresAt) {
+  return {
+    'ocstatus.replyLaunch.v1': JSON.stringify({
+      [String(token)]: { sessionId, expiresAt }
+    })
+  };
+}
+
+test('bundled UUID is selected for sources, reads, and actions', async () => {
+  const h = harness({ plugins: [bundledPlugin()] });
+  assert.ok(h.subscriptions.length > 0);
+  assert.ok(h.subscriptions.every((entry) => entry.plugin === BUNDLED_OPENCODE_UUID));
+
+  h.watch({ detail_req: 1, session_id: 'ses_bundled' });
+  assert.ok(h.reads.length > 0);
+  assert.ok(h.reads.every((request) => request.plugin === BUNDLED_OPENCODE_UUID));
+
+  h.watch({
+    permission_decision: 1,
+    session_id: 'ses_bundled',
+    permission_request_id: 'perm_1',
+    permission_choice: 0
+  });
+  await new Promise((resolve) => setImmediate(resolve));
+  assert.equal(h.actions.length, 1);
+  assert.equal(h.actions[0].plugin, BUNDLED_OPENCODE_UUID);
+});
+
+test('legacy UUID is the fallback when the bundled plugin is absent', () => {
+  const h = harness();
+  assert.ok(h.subscriptions.length > 0);
+  assert.ok(h.subscriptions.every((entry) => entry.plugin === OPENCODE_UUID));
+});
+
+test('a bundled plugin with the wrong source list is not used', () => {
+  const h = harness({ plugins: [bundledPlugin(['agent/chats'])] });
+  assert.equal(h.subscriptions.length, 0);
+  const end = h.takeSent().find((message) => message.list_end);
+  assert.ok(end);
+  assert.equal(end.status_text, 'No OC plugin');
+});
+
+test('open_reply routes a valid, unexpired token in the combined app', () => {
+  const token = 123456;
+  const h = harness({
+    plugins: [bundledPlugin()],
+    now: 1700000000000,
+    storage: openReplyStorage(token, 'ses_launch', 1700000060000)
+  });
+  h.takeSent();
+  h.watch({ open_reply: token });
+  const response = h.takeSent().find((message) => message.open_reply !== undefined);
+  assert.ok(response);
+  assert.equal(response.open_reply, token);
+  assert.equal(response.session_id, 'ses_launch');
+});
+
+test('valid open_reply route followed by detail_req reads reply for routed session', async () => {
+  const token = 123457;
+  const h = harness({
+    plugins: [bundledPlugin()],
+    now: 1700000000000,
+    storage: openReplyStorage(token, 'ses_launch', 1700000060000)
+  });
+  h.takeSent();
+  h.watch({ open_reply: token });
+  const response = h.takeSent().find((message) => message.open_reply !== undefined);
+  assert.equal(response.session_id, 'ses_launch');
+
+  h.watch({ detail_req: 1, session_id: response.session_id });
+  await new Promise((resolve) => setImmediate(resolve));
+  assert.ok(h.reads.some((request) => request.item === 'replies' &&
+    request.plugin === BUNDLED_OPENCODE_UUID));
+  assert.ok(h.takeSent().some((message) => message.session_id === 'ses_launch'));
+});
+
+test('open_reply rejects expired and malformed entries', () => {
+  const token = 222;
+  const expired = harness({
+    plugins: [bundledPlugin()],
+    now: 1700000000000,
+    storage: openReplyStorage(token, 'ses_expired', 1700000000000)
+  });
+  expired.takeSent();
+  expired.watch({ open_reply: token });
+  let response = expired.takeSent().find((message) => message.open_reply !== undefined);
+  assert.ok(response);
+  assert.equal(response.open_reply, token);
+  assert.equal(response.session_id, undefined);
+
+  const nonNumericExpiry = harness({
+    plugins: [bundledPlugin()],
+    now: 1700000000000,
+    storage: openReplyStorage(token, 'ses_numeric', '1700000060000')
+  });
+  nonNumericExpiry.takeSent();
+  nonNumericExpiry.watch({ open_reply: token });
+  response = nonNumericExpiry.takeSent().find((message) => message.open_reply !== undefined);
+  assert.equal(response.session_id, undefined);
+
+  const malformed = harness({
+    plugins: [bundledPlugin()],
+    now: 1700000000000,
+    storage: {
+      'ocstatus.replyLaunch.v1': JSON.stringify({
+        [String(token)]: { sessionId: 'bad session!', expiresAt: 1700000060000 }
+      })
+    }
+  });
+  malformed.takeSent();
+  malformed.watch({ open_reply: token });
+  response = malformed.takeSent().find((message) => message.open_reply !== undefined);
+  assert.ok(response);
+  assert.equal(response.session_id, undefined);
+});
+
+test('open_reply does not resolve the shared token outside the combined app', () => {
+  const token = 333;
+  const h = harness({
+    now: 1700000000000,
+    storage: openReplyStorage(token, 'ses_legacy', 1700000060000)
+  });
+  h.takeSent();
+  h.watch({ open_reply: token });
+  const response = h.takeSent().find((message) => message.open_reply !== undefined);
+  assert.ok(response);
+  assert.equal(response.open_reply, token);
+  assert.equal(response.session_id, undefined);
+});
+
+test('configmessage returns and saves sanitized settings without cross-setting changes', () => {
+  const h = harness({
+    storage: {
+      'ocstatus.settings.v1': JSON.stringify({
+        poll_rate: 0,
+        subagents: 'number',
+        mark_read_after: 900,
+        canned_replies: ['Yes']
+      })
+    }
+  });
+  let replied = null;
+  h.handlers.configmessage({
+    data: { type: 'ocstatus_settings' },
+    respond(value) { replied = value; }
+  });
+  assert.deepEqual(JSON.parse(JSON.stringify(replied)), {
+    poll_rate: 0,
+    only_action: 0,
+    subagents: 'number',
+    mark_read_after: 900,
+    canned_replies: ['Yes']
+  });
+
+  replied = null;
+  h.handlers.configmessage({
+    data: { type: 'ocstatus_save_settings', settings: { only_action: 1 } },
+    respond(value) { replied = value; }
+  });
+  assert.equal(replied.only_action, 1);
+  assert.equal(replied.poll_rate, 0);
+  assert.equal(replied.subagents, 'number');
+  assert.equal(replied.mark_read_after, 900);
+  assert.deepEqual(JSON.parse(JSON.stringify(replied.canned_replies)), ['Yes']);
+
+  replied = null;
+  h.handlers.configmessage({
+    payload: {
+      type: 'ocstatus_save_settings',
+      settings: { poll_rate: 999, canned_replies: [' Run ', 'Run', 'x'.repeat(100)] }
+    },
+    respond(value) { replied = value; }
+  });
+  assert.equal(replied.poll_rate, 0);
+  assert.deepEqual(JSON.parse(JSON.stringify(replied.canned_replies)), ['Run', 'x'.repeat(80)]);
+});
+
+test('configmessage reports failed settings persistence and restores in-memory settings', () => {
+  const h = harness({ failStorageWrites: true });
+  let replied = null;
+  h.handlers.configmessage({
+    data: { type: 'ocstatus_save_settings', settings: { only_action: 1 } },
+    respond(value) { replied = value; }
+  });
+  assert.deepEqual(JSON.parse(JSON.stringify(replied)), { error: 'settings could not be saved' });
+  h.handlers.configmessage({
+    data: { type: 'ocstatus_settings' },
+    respond(value) { replied = value; }
+  });
+  assert.equal(replied.only_action, 0);
+});
+
+test('manual polling reads recent replies at most once a minute only when opted in', async () => {
+  const h = harness({
+    plugins: [bundledPlugin()],
+    storage: { 'ocstatus.replyAlerts.enabled.v1': '1' },
+    replies: { instances: [] }
+  });
+  h.setSource('configured', { instances: [] });
+  h.setSource('chats', { instances: [] });
+  h.setSource('active_session', { instances: [] });
+  h.setSource('chat_status', { instances: [] });
+  h.setSource('question', { instances: [] });
+  h.handlers.webviewclosed({ response: encodeURIComponent(JSON.stringify({ poll_rate: 10 })) });
+  await new Promise((resolve) => setImmediate(resolve));
+  assert.equal(h.reads.filter((request) => request.item === 'replies').length, 1);
+  assert.equal(h.reads.find((request) => request.item === 'replies').plugin, BUNDLED_OPENCODE_UUID);
+
+  h.reads.splice(0, h.reads.length);
+  h.runTimers();
+  await new Promise((resolve) => setImmediate(resolve));
+  assert.equal(h.reads.filter((request) => request.item === 'replies').length, 0);
+
+  h.advanceTime(61000);
+  h.runTimers();
+  await new Promise((resolve) => setImmediate(resolve));
+  assert.equal(h.reads.filter((request) => request.item === 'replies').length, 1);
+});
+
+test('manual polling does not read recent replies by default or for the legacy UUID', async () => {
+  const off = harness({ plugins: [bundledPlugin()], replies: { instances: [] } });
+  off.handlers.webviewclosed({ response: encodeURIComponent(JSON.stringify({ poll_rate: 10 })) });
+  await new Promise((resolve) => setImmediate(resolve));
+  assert.equal(off.reads.some((request) => request.item === 'replies'), false);
+
+  const legacy = harness({
+    storage: { 'ocstatus.replyAlerts.enabled.v1': '1' },
+    replies: { instances: [] }
+  });
+  legacy.handlers.webviewclosed({ response: encodeURIComponent(JSON.stringify({ poll_rate: 10 })) });
+  await new Promise((resolve) => setImmediate(resolve));
+  assert.equal(legacy.reads.some((request) => request.item === 'replies'), false);
 });

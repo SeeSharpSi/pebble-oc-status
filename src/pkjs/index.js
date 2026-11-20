@@ -6,7 +6,9 @@
 // the plugin exposes. That reply source follows the plugin's configured default session, so the
 // UI says so plainly rather than pretending every session can be read back.
 
-var OPENCODE_UUID = '4e2c758f-8a31-4bf2-a6d9-7c40ec9b5173';
+var LEGACY_OPENCODE_UUID = '4e2c758f-8a31-4bf2-a6d9-7c40ec9b5173';
+var BUNDLED_OPENCODE_UUID = '67166e14-419d-42b3-9bb4-af34cc83b436';
+var activePluginUuid = LEGACY_OPENCODE_UUID;
 var MAX_SESSIONS = 20;
 var MAX_CHOICES = 24;
 var REPLY_CHUNK_SIZE = 380;
@@ -42,6 +44,9 @@ var KEY_UNVIEWED = 'ocstatus.unviewed.v1';
 var KEY_VIEWED_REPLY = 'ocstatus.viewedReply.v1';
 var KEY_KNOWN = 'ocstatus.known.v1';
 var KEY_SETTINGS = 'ocstatus.settings.v1';
+var KEY_REPLY_LAUNCH = 'ocstatus.replyLaunch.v1';
+var KEY_REPLY_ALERTS_ENABLED = 'ocstatus.replyAlerts.enabled.v1';
+var REPLY_ALERTS_MIN_INTERVAL_MS = 60 * 1000;
 var CONFIG_PAGE = require('./config-page.json').html;
 
 var SAVED_SETTINGS = readObject(KEY_SETTINGS, {});
@@ -94,6 +99,7 @@ var state = {
   lastListForceAt: null,
   replyCap: REPLY_CAP_DEFAULT,
   inboxSize: INBOX_SIZE_DEFAULT,
+  replyAlertsLastReadAt: 0,
   detailSession: '',
   detailKind: '',
   flow: null,
@@ -126,8 +132,10 @@ function readObject(key, fallback) {
 function writeObject(key, value) {
   try {
     localStorage.setItem(key, JSON.stringify(value));
+    return true;
   } catch (e) {
     log('could not save ' + key + ': ' + e);
+    return false;
   }
 }
 
@@ -300,14 +308,87 @@ function applyCapabilities(payload) {
   if (changed) state.lastReplyKey = '';
 }
 
-function pluginInstalled() {
+function pluginServesExpectedSources(plugin) {
+  // Some hosts omit the source list. When it is present, reject a stale plugin that only
+  // shares the combined UUID but no longer serves the sources this app needs.
+  if (!plugin || !Array.isArray(plugin.sources)) return true;
+  function hasSource(category, item) {
+    return plugin.sources.some(function (source) {
+      if (typeof source === 'string') return source === category + '/' + item;
+      return source && source.category === category && Array.isArray(source.items) &&
+             source.items.indexOf(item) !== -1;
+    });
+  }
+  return hasSource('agent', 'chats') && hasSource('opencode', 'replies');
+}
+
+function selectPluginUuid() {
   try {
     var plugins = Pebble.enumeratePlugins();
     if (!Array.isArray(plugins)) return false;
-    return plugins.some(function (plugin) { return plugin && plugin.uuid === OPENCODE_UUID; });
+    var bundled = null;
+    var legacy = null;
+    plugins.forEach(function (plugin) {
+      if (!plugin || !plugin.uuid) return;
+      if (plugin.uuid === BUNDLED_OPENCODE_UUID) bundled = plugin;
+      else if (plugin.uuid === LEGACY_OPENCODE_UUID) legacy = plugin;
+    });
+    if (bundled) {
+      if (!pluginServesExpectedSources(bundled)) return false;
+      activePluginUuid = BUNDLED_OPENCODE_UUID;
+      return true;
+    }
+    // Fallback is for tests and older separate-plugin builds only. A present but stale bundled
+    // plugin must not silently route reads and actions at the old UUID.
+    if (legacy) {
+      activePluginUuid = LEGACY_OPENCODE_UUID;
+      return true;
+    }
+    activePluginUuid = LEGACY_OPENCODE_UUID;
+    return false;
   } catch (e) {
+    activePluginUuid = LEGACY_OPENCODE_UUID;
     return false;
   }
+}
+
+function pluginInstalled() {
+  return selectPluginUuid();
+}
+
+function isBundledContext() {
+  return activePluginUuid === BUNDLED_OPENCODE_UUID;
+}
+
+function validReplySessionId(value) {
+  if (typeof value !== 'string') return '';
+  var id = value.trim();
+  if (!id || id.length > MAX_REPLY_SESSION_ID_BYTES) return '';
+  if (!/^[A-Za-z0-9][A-Za-z0-9._:-]*$/.test(id)) return '';
+  return id;
+}
+
+function resolveReplyLaunch(token) {
+  if (!isBundledContext()) return '';
+  var launches = readObject(KEY_REPLY_LAUNCH, {});
+  var entry = launches[String(token)];
+  if (!entry || typeof entry !== 'object' || Array.isArray(entry)) return '';
+  var expiresAt = entry.expiresAt;
+  if (typeof expiresAt !== 'number' || !isFinite(expiresAt) || expiresAt <= Date.now()) return '';
+  return validReplySessionId(entry.sessionId);
+}
+
+function respondOpenReply(token, sessionId) {
+  var message = { open_reply: token };
+  if (sessionId) message.session_id = sessionId;
+  enqueue(message);
+}
+
+function handleOpenReply(token) {
+  var number = Number(token);
+  if (!isFinite(number) || Math.floor(number) !== number || number <= 0 ||
+      number > 0x7fffffff) return;
+  respondOpenReply(number, resolveReplyLaunch(number));
 }
 
 function errorCode(error) {
@@ -351,7 +432,7 @@ function readSourceOnce(category, item, options) {
   if (typeof Pebble.readSource === 'function') {
     try {
       request = Pebble.readSource({
-        plugin: OPENCODE_UUID,
+        plugin: activePluginUuid,
         category: category,
         item: item,
         maxStalenessMs: 0
@@ -389,7 +470,7 @@ function readSourceOnce(category, item, options) {
       }, SOURCE_READ_TIMEOUT_MS);
       try {
         var created = Pebble.subscribeToSource({
-          plugin: OPENCODE_UUID,
+          plugin: activePluginUuid,
           category: category,
           item: item,
           maxStalenessMs: 0,
@@ -1735,7 +1816,7 @@ function submitFlow() {
 
   Promise.resolve().then(function () {
     return Pebble.invokeAction({
-      plugin: OPENCODE_UUID,
+      plugin: activePluginUuid,
       action: 'answer_question',
       args: { session_id: sessionId, form_id: formId, answer: answer }
     });
@@ -1768,7 +1849,7 @@ function decidePermission(sessionId, requestId, decision) {
   state.permissionPending = true;
   Promise.resolve().then(function () {
     return Pebble.invokeAction({
-      plugin: OPENCODE_UUID,
+      plugin: activePluginUuid,
       action: 'approve_permission',
       args: {
         session_id: sessionId,
@@ -1823,7 +1904,7 @@ function autoMarkRead(sessionId, messageId) {
   if (messageId) args.message_id = messageId;
   Promise.resolve().then(function () {
     return Pebble.invokeAction({
-      plugin: OPENCODE_UUID,
+      plugin: activePluginUuid,
       action: 'mark_chat_read',
       args: args
     });
@@ -1888,7 +1969,7 @@ function markChatRead(sessionId, messageId) {
 
   Promise.resolve().then(function () {
     return Pebble.invokeAction({
-      plugin: OPENCODE_UUID,
+      plugin: activePluginUuid,
       action: 'mark_chat_read',
       args: { session_id: sessionId, message_id: messageId }
     });
@@ -1921,7 +2002,7 @@ function clearChatRead(sessionId) {
 
   Promise.resolve().then(function () {
     return Pebble.invokeAction({
-      plugin: OPENCODE_UUID,
+      plugin: activePluginUuid,
       action: 'mark_chat_read',
       args: args
     });
@@ -2189,6 +2270,16 @@ function pollSources() {
     pollRead('opencode', 'chat_status', 'chatStatus', onChatStatus),
     pollRead('opencode', 'question', 'question', onQuestions)
   ];
+  // Manual polling normally leaves recent replies to the detail read. The combined app can
+  // opt in to one bounded replies refresh per minute for reply alerts.
+  if (isBundledContext() && localStorage.getItem(KEY_REPLY_ALERTS_ENABLED) === '1' &&
+      (state.replyAlertsLastReadAt === 0 ||
+       Date.now() - state.replyAlertsLastReadAt >= REPLY_ALERTS_MIN_INTERVAL_MS)) {
+    state.replyAlertsLastReadAt = Date.now();
+    reads.push(pollRead('opencode', 'replies', 'replies', function (envelope) {
+      onReplies(envelope);
+    }));
+  }
   Promise.all(reads).then(function () {
     if (state.pollGeneration !== generation) return;
     state.polling = false;
@@ -2218,13 +2309,25 @@ function applyPollingMode() {
   rebuild(true);
 }
 
+function settingsObject() {
+  return {
+    poll_rate: state.pollRateSec,
+    only_action: state.onlyAction ? 1 : 0,
+    subagents: state.subagentsMode,
+    mark_read_after: state.markReadAfterSec,
+    canned_replies: state.cannedReplies.slice()
+  };
+}
+
 function applySettings(options) {
-  if (!options || (options.poll_rate === undefined && options.only_action === undefined &&
-      options.mark_read_after === undefined && options.canned_replies === undefined &&
-      options.subagents === undefined)) return;
+  if (!options || typeof options !== 'object' ||
+      (options.poll_rate === undefined && options.only_action === undefined &&
+       options.mark_read_after === undefined && options.canned_replies === undefined &&
+       options.subagents === undefined)) return null;
   var rateChanged = false;
   var filterChanged = false;
   var markChanged = false;
+  var previous = settingsObject();
   if (options.poll_rate !== undefined) {
     var rate = Number(options.poll_rate);
     if ([0, 10, 30, 60].indexOf(rate) === -1) rate = 0;
@@ -2251,22 +2354,25 @@ function applySettings(options) {
   if (options.canned_replies !== undefined) {
     state.cannedReplies = normalizeCannedReplies(options.canned_replies);
   }
-  writeObject(KEY_SETTINGS, {
-    poll_rate: state.pollRateSec,
-    only_action: state.onlyAction ? 1 : 0,
-    subagents: state.subagentsMode,
-    mark_read_after: state.markReadAfterSec,
-    canned_replies: state.cannedReplies
-  });
+  var saved = settingsObject();
+  if (!writeObject(KEY_SETTINGS, saved)) {
+    state.pollRateSec = previous.poll_rate;
+    state.onlyAction = !!previous.only_action;
+    state.subagentsMode = previous.subagents;
+    state.markReadAfterSec = previous.mark_read_after;
+    state.cannedReplies = previous.canned_replies;
+    return false;
+  }
   if (rateChanged) applyPollingMode();
   if (filterChanged) rebuild(true);
   if (markChanged) maybeAutoMarkRead();
+  return saved;
 }
 
 function subscribeSource(category, item, key, onData) {
   try {
     state.subscriptions.push(Pebble.subscribeToSource({
-      plugin: OPENCODE_UUID,
+      plugin: activePluginUuid,
       category: category,
       item: item,
       onData: function (envelope) {
@@ -2386,7 +2492,7 @@ function finishPromptUpload() {
 
   Promise.resolve().then(function () {
     return Pebble.invokeAction({
-      plugin: OPENCODE_UUID,
+      plugin: activePluginUuid,
       action: 'send_to_agent',
       args: { message: upload.text, chat_id: sessionId, delivery: delivery }
     });
@@ -2416,6 +2522,9 @@ function handleWatchMessage(payload) {
     }
     ensurePlugin();
     sendList(true);
+  }
+  if (payload.open_reply !== undefined) {
+    handleOpenReply(payload.open_reply);
   }
   if (payload.canned_req) {
     sendCannedReplies();
@@ -2495,6 +2604,31 @@ Pebble.addEventListener('webviewclosed', function (event) {
     }
   }
   applySettings(options);
+});
+
+Pebble.addEventListener('configmessage', function (event) {
+  var respond = event && typeof event.respond === 'function' ? event.respond : null;
+  if (!respond) return;
+  // The phone config bridge uses `event.data`; keep a payload alias for host variants.
+  var data = event && event.data !== undefined ? event.data : event && event.payload;
+  if (!data || typeof data !== 'object' || Array.isArray(data)) {
+    respond({ error: 'invalid settings message' });
+    return;
+  }
+  if (data.type === 'ocstatus_settings') {
+    respond(settingsObject());
+    return;
+  }
+  if (data.type === 'ocstatus_save_settings') {
+    var saved = applySettings(data.settings);
+    if (!saved) {
+      respond({ error: saved === false ? 'settings could not be saved' : 'no valid settings supplied' });
+      return;
+    }
+    respond(saved);
+    return;
+  }
+  respond({ error: 'unsupported settings message' });
 });
 
 Pebble.addEventListener('ready', function () {

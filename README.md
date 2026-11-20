@@ -1,7 +1,9 @@
 # OpenCode Status
 
-A Pebble watchapp for the [OpenCode Pebble plugin](../oc-plugin). It shows the sessions the
-plugin knows about and lets you open them from the watch.
+A Pebble watchapp with a bundled copy of the [OpenCode Pebble plugin](../oc-plugin). It shows
+the sessions the plugin knows about and lets you open them from the watch. The bundled plugin
+is used whenever present; standalone plugin is fallback only when bundled copy is absent. An
+installed standalone plugin remains usable independently by other apps.
 
 - A braille-style spinner marks a running session.
 - A dot marks a session that needs attention. On colour watches it is green for an unread reply,
@@ -31,12 +33,15 @@ plugin knows about and lets you open them from the watch.
   immediately. The plugin's receipt is shown on the watch. Aplite does not include canned replies or
   dictation.
 
-The watch UI is C. All plugin access is in `src/pkjs/index.js`; the watch only receives a small
-flat session list and one detail at a time over AppMessage.
+The watch UI is C. All watchapp/plugin access is in `src/pkjs/index.js`; the watch only receives
+a small flat session list and one detail at a time over AppMessage. Bundled plugin script and
+config page are generated and committed at `src/plugin/index.js` and `src/config.html`.
 
 ## Settings
 
-Open **OpenCode Status** in the Pebble app and use its settings page (the gear icon).
+Open **OpenCode Status** in the Pebble app and use its settings page (the gear icon). The page
+contains both OpenCode plugin connection/actions and watch preferences. Plugin polling and
+reply notifications are opt-in; notifications default off.
 
 - **Plugin polling**: **Plugin default** keeps the plugin's own suggested refresh intervals.
   Choosing 10, 30, or 60 seconds makes the app poll the chat list, active sessions, chat status, and
@@ -61,9 +66,32 @@ Open **OpenCode Status** in the Pebble app and use its settings page (the gear i
   **Continue**, **Yes**, **No**, and **Run tests**. Short-press Select on a reply to choose one;
   long-press to dictate.
 
-Settings are stored by the phone-side app and applied the next time the watch app refreshes. The
+Settings are stored by the phone-side app. Watch preferences load from PKJS before controls become
+editable, then save back to PKJS; settings never fall back to defaults after a failed load. The
 settings page is embedded in the phone-side app and opened from the Pebble app; it does not use a
 network host.
+
+## Bundled plugin and upgrade
+
+Install or update **OpenCode Status** from its existing listing; do not install a second copy with
+a different UUID. The app uses the plugin bundled under the watchapp UUID whenever present. Legacy
+standalone plugin UUID is fallback only when bundled copy is absent; a present but unconfigured
+bundled copy does not fall back. After updating an existing listing, open settings and connect the
+bundled plugin again. Bundled and standalone credentials use separate secure-storage entries.
+Existing standalone plugin remains usable by other apps and does not need removal.
+
+The plugin reads sources only while a subscriber is active. Replies can be polled while OC Status
+is open or another subscriber is active. Polling is not a background service: it does not wake the
+phone, and completed-reply alerts cannot wake the plugin. Opening a reply reads its details on
+demand. Reply notifications are optional and require phone app notification support and permission.
+Tap **Open reply** to launch its session in OC Status when app is not already running. Launch links
+expire after 10 minutes. Supported firmware supplies launch arguments only when OC Status is not
+already running; after exiting app, reopen target session from watch notification history.
+
+The combined manifest requests Internet and LocalNetwork for plugin requests. `ShowNotifications`
+and legacy standalone `InvokeAction` each declare `required: false`; bundled actions use app's own
+UUID and need no self-permission. The standalone plugin manifest and package remain separate and
+unchanged by this combined build process.
 
 ## Chat status, unread, and replies
 
@@ -119,21 +147,28 @@ not retried; the plugin's receipt or error is shown.
 ## Requirements
 
 - Pebble SDK 4.44 or later and `pebble-tool` 5.1 or later.
-- OpenCode plugin 0.7.0 or later (`4e2c758f-8a31-4bf2-a6d9-7c40ec9b5173`) installed on the phone.
-- Plugins enabled in the Pebble mobile app, with the plugin connected by password or `opencode pair`
-  link.
+- OpenCode V2 HTTP API server.
+- Plugins enabled in the Pebble mobile app, with the bundled plugin connected by password or
+  `opencode pair` link. If using standalone fallback, use OpenCode plugin 0.7.0 or later
+  (`4e2c758f-8a31-4bf2-a6d9-7c40ec9b5173`).
 
-The app requests only the `InvokeAction` permission for the OpenCode plugin, so it can answer
-questions, send prompts, mark chats read, and approve permissions. Reading the plugin's sources does
-not require additional app permissions.
+Plugin connection requires server credentials saved through combined settings. Existing server
+credentials in standalone plugin do not transfer because each plugin stores them separately.
 
 ## Build and test
 
 ```sh
+# Optional when sibling ../oc-plugin has newer source; accepts another source directory too.
+npm run sync-plugin -- ../oc-plugin
 npm test
 pebble build
 pebble install --cloudpebble
 ```
+
+Generated plugin assets are committed, so `pebble build` works from a clean OC Status clone without
+the sibling checkout. Before release, sync from the desired `oc-plugin` source checkout, review the
+generated manifest/script/config diffs, then commit them with OC Status. `npm run check-plugin-bundle`
+checks generated assets against the sibling source without writing files.
 
 `npm test` runs phone-side state tests with a fake `Pebble` and `localStorage`, plus a host-compiled
 watch-animation and capability harness using the actual plain-C animation policy. It requires Node.js
